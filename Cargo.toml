@@ -1,0 +1,54 @@
+[package]
+name = "SyncGDrive"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "syncgdrive"
+path = "src/main.rs"
+
+[lib]
+name = "sync_g_drive"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow      = "1.0"
+thiserror   = "2.0"
+serde       = { version = "1.0", features = ["derive"] }
+toml        = "0.8"
+tokio       = { version = "1", features = ["full"] }
+tokio-util  = { version = "0.7", features = ["rt"] }
+notify      = "6.1"
+rusqlite    = { version = "0.37", features = ["bundled"] }
+sha2        = "0.10"
+walkdir     = "2"
+globset     = "0.4"
+tracing             = "0.1"
+tracing-subscriber  = { version = "0.3", features = ["env-filter", "fmt", "time", "ansi"] }
+tracing-appender    = "0.2"
+time        = { version = "0.3", features = ["formatting"] }
+async-trait = "0.1"
+notify-rust = "4"
+libc         = "0.2"
+
+[dev-dependencies]
+tempfile = "3"
+
+[dependencies.gtk4]
+version  = "0.11"
+features = ["v4_10"]
+optional = true
+
+
+[dependencies.libadwaita]
+version  = "0.9"
+features = ["v1_5"]
+optional = true
+
+[dependencies.ksni]
+version  = "0.3"
+optional = true
+
+[features]
+default = []
+ui = ["dep:gtk4", "dep:libadwaita", "dep:ksni"]
