@@ -93,6 +93,7 @@ All design is complete before coding. See `docs/V2/`:
 - **Retry with exponential backoff**: `scan::retry()` detects fatal errors (auth/token/403/401/quota) via `is_fatal_kio_err()` to bail immediately. V2 adds rate limiter + `Retry-After` header support.
 - **Engine commands via mpsc**: `EngineCommand` channel drives Pause/Resume/ForceScan/ApplyConfig/Shutdown. Status flows back via `UnboundedSender<EngineStatus>`.
 - **SyncProgress tracking**: V1: `AtomicUsize` counters (files). V2: + `AtomicU64` for bytes, `ProgressTracker` with sliding-window speed, ETA.
+- **UI update throttle (V2)**: Workers write to `AtomicU64` counters with zero blocking. A dedicated `progress_publisher` Tokio task samples a snapshot every 200ms and sends ONE `EngineStatus::SyncProgress` to the UI. Max 5 updates/sec regardless of upload speed or worker count. Prevents GTK thread saturation.
 - **GTK on a SINGLE persistent OS thread**: `tray.rs` creates a single `gtk-ui` thread via `OnceLock` + `std::sync::mpsc`. All GTK windows (Settings, About, Scan progress, OAuth wizard) run sequentially on this thread. `libadwaita::init()` called ONCE. `settings.rs` must NOT call it.
 - **notify-rust ALWAYS on a separate OS thread**: `notif::send()` spawns `std::thread` because `notify-rust` calls `zbus::block_on()` which panics inside Tokio.
 - **PID file**: `acquire_instance_lock()` writes PID to `$XDG_RUNTIME_DIR/syncgdrive.lock` via `flock`. Truncates first (`set_len(0)`).

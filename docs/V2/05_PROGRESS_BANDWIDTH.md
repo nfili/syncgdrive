@@ -163,6 +163,72 @@ Total : 128 Mo / 512 Mo
 - Le limiter est partagé entre tous les workers → la limite est **globale**.
 - Affiché dans le tooltip : `⚡ Limité à 500 Ko/s` si actif.
 
+### 5.6 Throttle des Mises à Jour UI (Anti-Saturation)
+
+**Problème** : Les callbacks de progression sont déclenchés à chaque chunk uploadé
+(toutes les ~1ms à 64 Ko/chunk sur une bonne connexion). Avec N workers en parallèle,
+le canal vers le thread GTK (`glib::MainContext::channel`) recevrait des milliers
+de messages par seconde, provoquant des lags visuels et une surconsommation CPU.
+
+**Solution** : Le `ProgressTracker` ne publie **pas** chaque event. Il agrège en interne
+(compteurs atomiques) et un tick périodique envoie un snapshot vers l'UI.
+
+```rust
+/// Tâche Tokio dédiée : publie un snapshot de progression vers l'UI
+/// à intervalle fixe (200ms). Les workers écrivent dans les AtomicU64
+/// en continu sans aucun coût de synchronisation.
+async fn progress_publisher(
+    tracker: Arc<ProgressTracker>,
+    status_tx: UnboundedSender<EngineStatus>,
+    shutdown: CancellationToken,
+) {
+    let mut interval = tokio::time::interval(Duration::from_millis(200));
+    loop {
+        tokio::select! {
+            biased;
+            _ = shutdown.cancelled() => break,
+            _ = interval.tick() => {
+                let snapshot = tracker.snapshot();
+                let _ = status_tx.send(EngineStatus::SyncProgress {
+                    done: snapshot.done_files,
+                    total: snapshot.total_files,
+                    current_dir: snapshot.current_dir.clone(),
+                    current_name: snapshot.current_name.clone(),
+                    size_bytes: snapshot.current_file_size,
+                    bytes_sent: snapshot.current_bytes_sent,
+                    total_bytes: snapshot.total_bytes,
+                    total_bytes_sent: snapshot.sent_bytes,
+                    speed_bps: snapshot.speed_bps,
+                });
+            }
+        }
+    }
+}
+```
+
+**Architecture du flux** :
+
+```
+Workers (N threads)                  ProgressTracker              UI
+    │                                    │                        │
+    │── record_bytes(64Ko) ───▶ AtomicU64.fetch_add()            │
+    │── record_bytes(64Ko) ───▶ AtomicU64.fetch_add()            │
+    │── record_bytes(64Ko) ───▶ AtomicU64.fetch_add()            │
+    │                                    │                        │
+    │               ┌── tick 200ms ──────┤                        │
+    │               │                    │                        │
+    │               │    snapshot() ─────│── SyncProgress ───────▶│
+    │               │                    │   (1 msg / 200ms)      │
+    │               └── tick 200ms ──────┤                        │
+    │                                    │                        │
+```
+
+**Garanties** :
+- **Workers** : zéro blocage (écriture atomique, pas de mutex, pas de channel send).
+- **UI** : max 5 messages/seconde (1 / 200ms), quelle que soit la vitesse d'upload.
+- **Précision** : les compteurs atomiques sont exacts — le snapshot est juste un échantillonnage temporel.
+- **Configurable** : l'intervalle de 200ms n'est **pas** dans `[advanced]` — c'est une constante structurelle d'UI, pas un paramètre utilisateur.
+
 ---
 
 ## 6. Cas Limites
@@ -174,6 +240,8 @@ Total : 128 Mo / 512 Mo
 | 10 000 petits fichiers (1 Ko chacun) | Vitesse = fichiers/s plus pertinente — mais on affiche quand même les octets |
 | `upload_limit_kbps = 1` (1 Ko/s) | Fonctionne mais très lent — pas de validation minimum |
 | Upload annulé (shutdown) | Progression s'arrête, pas de division par zéro |
+| 4 workers uploadent simultanément | Max 5 updates UI/s (throttle 200ms), pas de lag |
+| Upload très rapide (réseau local, petit fichier) | Au moins 1 snapshot publié (tick garanti) |
 
 ---
 
@@ -188,6 +256,8 @@ Total : 128 Mo / 512 Mo
 - `test_bandwidth_limiter_unlimited` : limit=0 → acquire retourne immédiatement
 - `test_bandwidth_limiter_throttle` : limit=1024 → délai observable entre chunks
 - `test_human_eta_format` : 180s → "~3 min", 45s → "~45 s", 3600s → "~1 h"
+- `test_progress_publisher_throttle` : 1000 record_bytes en 100ms → max 1 snapshot publié
+- `test_progress_snapshot_accuracy` : snapshot reflète la somme exacte des record_bytes
 
 ---
 
@@ -199,6 +269,8 @@ Total : 128 Mo / 512 Mo
 - [ ] La limitation de bande passante fonctionne (vérifiable avec un gros fichier)
 - [ ] La barre de progression globale est correcte (octets totaux)
 - [ ] Pas de division par zéro ni de panic sur des cas limites
+- [ ] Les mises à jour UI sont throttlées à max 5/s (pas de saturation du thread GTK)
+- [ ] Les workers n'ont aucun blocage lié à la progression (écritures atomiques uniquement)
 - [ ] `cargo test` : tous les tests passent
 - [ ] `cargo clippy` : 0 warning
 
