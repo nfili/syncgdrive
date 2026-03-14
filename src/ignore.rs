@@ -1,13 +1,62 @@
+//! Filtrage des fichiers et dossiers par patterns glob.
+//!
+//! Ce module fournit [`IgnoreMatcher`], un matcher compilé de patterns glob
+//! utilisé pour exclure des fichiers/dossiers de la synchronisation.
+//!
+//! # Patterns supportés
+//!
+//! La syntaxe glob est celle de la crate [`globset`] :
+//!
+//! | Pattern | Exclut |
+//! |---------|--------|
+//! | `**/target/**` | Tout dossier `target/` et son contenu |
+//! | `**/.git/**` | Tous les dépôts Git |
+//! | `**/*.log` | Tous les fichiers `.log` |
+//! | `**/build/**` | Tous les dossiers `build/` |
+//!
+//! # Astuce trailing-slash
+//!
+//! Un pattern comme `**/target/**` (regex `…target/.*$`) ne matche jamais
+//! le dossier lui-même (`/home/…/target`) car il exige du contenu après le `/`.
+//! [`IgnoreMatcher::is_ignored`] ajoute automatiquement un `/` terminal
+//! pour les répertoires, permettant au glob de matcher le dossier en plus
+//! de ses enfants.
+
 use std::path::Path;
 
 use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use anyhow::Result;
 
+/// Matcher compilé de patterns glob pour le filtrage des fichiers.
+///
+/// Construit une seule fois via [`from_patterns`](Self::from_patterns) à partir
+/// de la liste `ignore_patterns` de [`AppConfig`](crate::config::AppConfig).
+/// Rechargé automatiquement lors d'un `ApplyConfig` (hot-reload).
+///
+/// # Exemple
+///
+/// ```
+/// use sync_g_drive::ignore::IgnoreMatcher;
+/// use std::path::Path;
+///
+/// let m = IgnoreMatcher::from_patterns(&[
+///     "**/target/**".to_string(),
+///     "**/*.log".to_string(),
+/// ]).unwrap();
+///
+/// assert!(m.is_ignored(Path::new("/proj/target/debug/bin")));
+/// assert!(m.is_ignored(Path::new("/var/log/app.log")));
+/// assert!(!m.is_ignored(Path::new("/proj/src/main.rs")));
+/// ```
 pub struct IgnoreMatcher {
     set: GlobSet,
 }
 
 impl IgnoreMatcher {
+    /// Compile une liste de patterns glob en un matcher efficace.
+    ///
+    /// Retourne une erreur si un pattern est syntaxiquement invalide.
+    /// Une liste vide produit un matcher qui n'ignore rien.
     pub fn from_patterns(patterns: &[String]) -> Result<Self> {
         let mut builder = GlobSetBuilder::new();
         for p in patterns {
@@ -59,10 +108,7 @@ mod tests {
             "**/syncgdrive_test_ignore_dir/**".to_string(),
         ]).unwrap();
 
-        // Le dossier lui-même doit être ignoré
         assert!(m.is_ignored(&dir), "directory itself should be ignored");
-
-        // Un fichier fictif à l'intérieur doit aussi être ignoré
         assert!(m.is_ignored(&dir.join("some_file.rs")),
             "file inside ignored dir should be ignored");
 
@@ -75,9 +121,47 @@ mod tests {
             "**/target/**".to_string(),
         ]).unwrap();
 
-        // Un fichier qui n'est pas dans target/ ne doit pas être ignoré
         let p = Path::new("/home/user/project/src/main.rs");
         assert!(!m.is_ignored(p));
+    }
+
+    #[test]
+    fn multiple_patterns() {
+        let m = IgnoreMatcher::from_patterns(&[
+            "**/target/**".into(),
+            "**/.git/**".into(),
+            "**/node_modules/**".into(),
+        ]).unwrap();
+
+        assert!(m.is_ignored(Path::new("/proj/target/debug/bin")));
+        assert!(m.is_ignored(Path::new("/proj/.git/config")));
+        assert!(m.is_ignored(Path::new("/proj/node_modules/lodash/index.js")));
+        assert!(!m.is_ignored(Path::new("/proj/src/lib.rs")));
+    }
+
+    #[test]
+    fn empty_patterns_ignores_nothing() {
+        let m = IgnoreMatcher::from_patterns(&[]).unwrap();
+        assert!(!m.is_ignored(Path::new("/any/path.txt")));
+    }
+
+    #[test]
+    fn deeply_nested_match() {
+        let m = IgnoreMatcher::from_patterns(&[
+            "**/.git/**".into(),
+        ]).unwrap();
+
+        assert!(m.is_ignored(Path::new("/a/b/c/.git/objects/pack/abc")));
+    }
+
+    #[test]
+    fn extension_pattern() {
+        let m = IgnoreMatcher::from_patterns(&[
+            "**/*.log".into(),
+        ]).unwrap();
+
+        assert!(m.is_ignored(Path::new("/var/log/app.log")));
+        assert!(!m.is_ignored(Path::new("/var/log/app.txt")));
     }
 }
 

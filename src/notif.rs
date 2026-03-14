@@ -1,123 +1,99 @@
 //! Notifications bureau via notify-rust.
 //!
-//! Toutes les fonctions vérifient `cfg.notifications` avant d'envoyer.
-//! Si la notification échoue (pas de serveur D-Bus, etc.), on log un warning
-//! mais on ne plante pas.
+//! Stratégie UX (UX_SYSTRAY.md) :
+//! - **Erreurs uniquement** : seules les erreurs fatales déclenchent un pop-up.
+//! - **Événements courants** (scan, transfert, pause) : affichés via le tooltip
+//!   de la systray, PAS via des pop-ups.
+//!
+//! Les fonctions non-error sont conservées (API stable) mais sont des no-ops.
 
 use notify_rust::{Notification, Urgency};
 
 use crate::config::AppConfig;
 
-/// Notification de démarrage du scan initial.
-pub fn scan_started(cfg: &AppConfig) {
-    if !cfg.notifications { return; }
-    send(
-        "SyncGDrive — Scan initial",
-        &format!(
-            "Inventaire de <b>{}</b> en cours…\nVeuillez patienter.",
-            cfg.local_root.display()
-        ),
-        "emblem-synchronizing",
-        Urgency::Low,
-    );
-}
+// ── Événements silencieux (tooltip systray uniquement) ─────────────────────
 
-/// Progression du scan (phase dossiers).
-pub fn scan_dirs_progress(cfg: &AppConfig, done: usize, total: usize) {
-    if !cfg.notifications { return; }
-    send(
-        "SyncGDrive — Création des dossiers",
-        &format!("Dossier {done}/{total} sur le Drive…"),
-        "folder-new",
-        Urgency::Low,
-    );
-}
+/// Scan initial démarré — silencieux (tooltip uniquement).
+pub fn scan_started(_cfg: &AppConfig) {}
 
-/// Scan terminé — résumé.
-pub fn scan_complete(cfg: &AppConfig, dirs: usize, to_sync: usize, skipped: usize) {
-    if !cfg.notifications { return; }
-    send(
-        "SyncGDrive — Scan terminé ✓",
-        &format!(
-            "<b>{dirs}</b> dossiers, <b>{to_sync}</b> fichiers à synchroniser, <b>{skipped}</b> déjà à jour.\n\
-             Vous pouvez maintenant travailler sur <b>{}</b>.",
-            cfg.local_root.display()
-        ),
-        "emblem-default",
-        Urgency::Normal,
-    );
-}
+/// Progression dossiers — silencieux.
+pub fn scan_dirs_progress(_cfg: &AppConfig, _done: usize, _total: usize) {}
 
-/// Progression de la synchronisation fichier par fichier.
-pub fn sync_progress(cfg: &AppConfig, done: usize, total: usize, name: &str, size: u64) {
-    if !cfg.notifications { return; }
-    let size_str = human_size(size);
-    send(
-        &format!("SyncGDrive — {done}/{total}"),
-        &format!("<b>{name}</b> ({size_str})"),
-        "emblem-synchronizing",
-        Urgency::Low,
-    );
-}
+/// Scan terminé — silencieux.
+pub fn scan_complete(_cfg: &AppConfig, _dirs: usize, _to_sync: usize, _skipped: usize) {}
 
-/// Synchronisation initiale terminée.
-pub fn sync_complete(cfg: &AppConfig, total: usize) {
+/// Progression fichier — silencieux.
+pub fn sync_progress(_cfg: &AppConfig, _done: usize, _total: usize, _name: &str, _size: u64) {}
+
+/// Sync initiale terminée — silencieux.
+pub fn sync_complete(_cfg: &AppConfig, _total: usize) {}
+
+/// Fichier individuel synchronisé — silencieux.
+pub fn file_synced(_cfg: &AppConfig, _name: &str) {}
+
+/// Moteur en pause — silencieux.
+pub fn paused(_cfg: &AppConfig) {}
+
+/// Moteur repris — silencieux.
+pub fn resumed(_cfg: &AppConfig) {}
+
+// ── Notifications actives (pop-up bureau) ─────────────────────────────────
+
+/// Synchronisation initiale terminée (§4A UX_SYSTRAY.md).
+/// Pop-up auto-dismiss après 6 secondes.
+pub fn initial_sync_complete(cfg: &AppConfig) {
     if !cfg.notifications { return; }
     send(
         "SyncGDrive — Synchronisation terminée ✓",
-        &format!("{total} fichier(s) transférés vers le Drive."),
-        "emblem-default",
+        "Le dossier est à jour.\nSurveillance active, vous pouvez travailler en toute sécurité.",
+        "emblem-ok-symbolic",
         Urgency::Normal,
+        6000,
     );
 }
 
-/// Un fichier a été modifié et re-synchronisé (watcher).
-pub fn file_synced(cfg: &AppConfig, name: &str) {
-    if !cfg.notifications { return; }
-    send(
-        "SyncGDrive",
-        &format!("↑ <b>{name}</b> synchronisé"),
-        "emblem-synchronizing",
-        Urgency::Low,
-    );
-}
-
-/// Erreur fatale (auth, etc.).
+/// Erreur fatale (auth, chemin, quota…).
+/// Reste à l'écran jusqu'à fermeture manuelle (sticky).
 pub fn error(cfg: &AppConfig, message: &str) {
     if !cfg.notifications { return; }
     send(
-        "SyncGDrive — Erreur ⚠",
+        "SyncGDrive — Action requise ⚠",
         message,
         "dialog-error",
         Urgency::Critical,
+        0, // timeout 0 = sticky (reste jusqu'à fermeture)
     );
 }
 
-/// Moteur en pause (réglages ouverts).
-pub fn paused(cfg: &AppConfig) {
+/// Dossier local surveillé introuvable (§4B UX_SYSTRAY.md).
+/// Sticky : reste jusqu'à fermeture manuelle.
+pub fn folder_missing(cfg: &AppConfig, path: &str) {
     if !cfg.notifications { return; }
     send(
-        "SyncGDrive — ⏸ En pause",
-        "Fenêtre de réglages ouverte. La synchronisation reprendra à la fermeture.",
-        "media-playback-pause",
-        Urgency::Low,
+        "SyncGDrive — Dossier introuvable",
+        &format!("Le dossier surveillé « {path} » a été renommé ou supprimé.\nMoteur en pause."),
+        "folder-open",
+        Urgency::Critical,
+        0,
     );
 }
 
-/// Moteur repris.
-pub fn resumed(cfg: &AppConfig) {
+/// Quota Google Drive ou disque plein (§4B UX_SYSTRAY.md).
+/// Sticky : reste jusqu'à fermeture manuelle.
+pub fn quota_exceeded(cfg: &AppConfig) {
     if !cfg.notifications { return; }
     send(
-        "SyncGDrive — ▶ Reprise",
-        "La synchronisation a repris.",
-        "emblem-synchronizing",
-        Urgency::Low,
+        "SyncGDrive — Espace insuffisant",
+        "Quota Google Drive ou disque local plein.\nTransferts suspendus.",
+        "drive-harddisk",
+        Urgency::Critical,
+        0,
     );
 }
 
-// ── Interne ───────────────────────────────────────────────────────────────────
+// ── Interne ───────────────────────────────────────────────────────────────
 
-fn send(summary: &str, body: &str, icon: &str, urgency: Urgency) {
+fn send(summary: &str, body: &str, icon: &str, urgency: Urgency, timeout_ms: i32) {
     // notify-rust 4.x appelle zbus::block_on() en interne dans show().
     // Si on est sur un worker Tokio, block_on panic ("runtime within runtime").
     // Solution : envoyer la notification depuis un thread OS séparé (pas de
@@ -132,26 +108,10 @@ fn send(summary: &str, body: &str, icon: &str, urgency: Urgency) {
             .body(&body)
             .icon(&icon)
             .urgency(urgency)
-            .timeout(4000)
+            .timeout(timeout_ms)
             .show()
         {
             tracing::debug!(error = %e, "notification send failed (pas de serveur D-Bus ?)");
         }
     });
 }
-
-fn human_size(bytes: u64) -> String {
-    const KB: u64 = 1024;
-    const MB: u64 = 1024 * KB;
-    const GB: u64 = 1024 * MB;
-    if bytes >= GB {
-        format!("{:.1} Go", bytes as f64 / GB as f64)
-    } else if bytes >= MB {
-        format!("{:.1} Mo", bytes as f64 / MB as f64)
-    } else if bytes >= KB {
-        format!("{:.0} Ko", bytes as f64 / KB as f64)
-    } else {
-        format!("{bytes} o")
-    }
-}
-

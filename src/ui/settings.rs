@@ -9,14 +9,15 @@ use crate::engine::EngineCommand;
 
 // ── Standalone runner ─────────────────────────────────────────────────────────
 
-/// Lance GTK + fenêtre Settings de façon autonome depuis un thread dédié.
+/// Lance la fenêtre Settings de façon autonome.
 /// Bloque jusqu'à fermeture de la fenêtre, puis GTK se termine proprement.
+///
+/// **Pré-requis** : `libadwaita::init()` doit avoir été appelé sur ce thread
+/// (géré par le thread `gtk-ui` dans `tray.rs`).
 ///
 /// **Pause/Resume** : envoie `Pause` à l'ouverture et `Resume` à la fermeture
 /// (que ce soit via Enregistrer ou la croix ✕).
 pub fn run_standalone(cmd_tx: tokio::sync::mpsc::Sender<EngineCommand>) -> Result<()> {
-    unsafe { std::env::set_var("ADWAITA_DISABLE_LEGACY_THEMING_WARNINGS", "1") };
-    libadwaita::init().map_err(|e| anyhow::anyhow!("adw: {e}"))?;
 
     // Pause immédiate : le moteur arrête de traiter les tasks.
     let _ = cmd_tx.try_send(EngineCommand::Pause);
@@ -100,6 +101,12 @@ where
         .text(cfg.local_root.to_string_lossy().as_ref())
         .build();
 
+    // Icône de validation live ✅/❌
+    let local_status = gtk4::Image::builder()
+        .valign(gtk4::Align::Center)
+        .build();
+    local_row.add_suffix(&local_status);
+
     // Bouton parcourir pour le dossier local
     let local_browse_btn = gtk4::Button::builder()
         .icon_name("folder-open-symbolic")
@@ -132,6 +139,12 @@ where
         .title("URL distante (ex: gdrive:/MonDrive/Backup)")
         .text(&cfg.remote_root)
         .build();
+
+    // Icône de validation live ✅/❌
+    let remote_status = gtk4::Image::builder()
+        .valign(gtk4::Align::Center)
+        .build();
+    remote_row.add_suffix(&remote_status);
 
     grp_paths.add(&local_row);
     grp_paths.add(&remote_row);
@@ -240,6 +253,39 @@ where
         .margin_end(24)
         .build();
 
+    // ══════════════════════════════════════════════════════════════════════════
+    //  Validation live des champs (icônes ✅/❌ + grisage bouton)
+    // ══════════════════════════════════════════════════════════════════════════
+
+    // Validation initiale au chargement
+    update_local_status(&local_row, &local_status);
+    update_remote_status(&remote_row, &remote_status);
+    update_save_sensitivity(&local_row, &remote_row, &btn_save);
+
+    // Callback : chaque frappe dans le champ local
+    {
+        let ls = local_status.clone();
+        let lr = local_row.clone();
+        let rr = remote_row.clone();
+        let bs = btn_save.clone();
+        local_row.connect_changed(move |row| {
+            update_local_status(row, &ls);
+            update_save_sensitivity(&lr, &rr, &bs);
+        });
+    }
+
+    // Callback : chaque frappe dans le champ remote
+    {
+        let rs = remote_status.clone();
+        let lr = local_row.clone();
+        let rr = remote_row.clone();
+        let bs = btn_save.clone();
+        remote_row.connect_changed(move |row| {
+            update_remote_status(row, &rs);
+            update_save_sensitivity(&lr, &rr, &bs);
+        });
+    }
+
     // ── Assemblage ────────────────────────────────────────────────────────────
     scroll.set_child(Some(&page));
 
@@ -298,6 +344,77 @@ where
 
     win.present();
     Ok(())
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  Helpers Validation Live
+// ══════════════════════════════════════════════════════════════════════════════
+
+/// Expand `~/…` vers le home réel (même logique que `config.rs`).
+fn settings_expand_tilde(text: &str) -> std::path::PathBuf {
+    if text.starts_with("~/") || text == "~" {
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+        std::path::PathBuf::from(home).join(&text[2..])
+    } else {
+        std::path::PathBuf::from(text)
+    }
+}
+
+/// Vérifie si le champ local est valide (non vide + dossier existant).
+fn is_local_valid(text: &str) -> bool {
+    if text.trim().is_empty() {
+        return false;
+    }
+    let path = settings_expand_tilde(text.trim());
+    path.is_dir()
+}
+
+/// Vérifie si le champ remote est valide (protocole reconnu).
+fn is_remote_valid(text: &str) -> bool {
+    let text = text.trim();
+    if text.is_empty() {
+        return false;
+    }
+    const SUPPORTED: &[&str] = &["gdrive://", "gdrive:/", "smb://", "sftp://", "webdav://", "ftp://"];
+    SUPPORTED.iter().any(|p| text.starts_with(p))
+}
+
+/// Met à jour l'icône ✅/❌ du champ local.
+fn update_local_status(row: &libadwaita::EntryRow, icon: &gtk4::Image) {
+    let text = row.text().to_string();
+    if text.trim().is_empty() {
+        icon.set_icon_name(None);
+    } else if is_local_valid(&text) {
+        icon.set_icon_name(Some("emblem-ok-symbolic"));
+        icon.set_tooltip_text(Some("Dossier valide"));
+    } else {
+        icon.set_icon_name(Some("dialog-error-symbolic"));
+        icon.set_tooltip_text(Some("Ce dossier n'existe pas"));
+    }
+}
+
+/// Met à jour l'icône ✅/❌ du champ remote.
+fn update_remote_status(row: &libadwaita::EntryRow, icon: &gtk4::Image) {
+    let text = row.text().to_string();
+    if text.trim().is_empty() {
+        icon.set_icon_name(None);
+    } else if is_remote_valid(&text) {
+        icon.set_icon_name(Some("emblem-ok-symbolic"));
+        icon.set_tooltip_text(Some("Protocole reconnu"));
+    } else {
+        icon.set_icon_name(Some("dialog-error-symbolic"));
+        icon.set_tooltip_text(Some("Protocole invalide (gdrive:/, smb://, sftp://, webdav://, ftp://)"));
+    }
+}
+
+/// Grise ou active le bouton Enregistrer selon la validité des champs.
+fn update_save_sensitivity(
+    local_row: &libadwaita::EntryRow,
+    remote_row: &libadwaita::EntryRow,
+    btn_save: &gtk4::Button,
+) {
+    let ok = is_local_valid(&local_row.text()) && is_remote_valid(&remote_row.text());
+    btn_save.set_sensitive(ok);
 }
 
 // ══════════════════════════════════════════════════════════════════════════════

@@ -1,0 +1,29 @@
+[Unit]
+Description=SyncGDrive — Synchronisation unidirectionnelle vers Google Drive
+Documentation=https://github.com/clyds/SyncGDrive
+# Attend que D-Bus session soit prêt (requis par ksni + notify-rust)
+After=graphical-session.target
+Requires=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.cargo/bin/syncgdrive
+# Arrêt propre via SIGTERM → self-pipe → shutdown gracieux (3s max)
+ExecStop=/bin/kill -TERM $MAINPID
+TimeoutStopSec=5
+Restart=on-failure
+RestartSec=10
+
+# Environnement nécessaire pour KIO, GTK4, D-Bus
+Environment=DISPLAY=:0
+# RUST_LOG configurable — info par défaut, debug pour diagnostiquer
+Environment=RUST_LOG=info,zbus=warn,globset=warn,glib=warn
+
+# Journalisation : stdout/stderr → journald (en plus des logs fichier internes)
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=syncgdrive
+
+[Install]
+WantedBy=graphical-session.target
+

@@ -60,6 +60,20 @@ impl Watcher {
                     }
                 }
 
+                // Fichier qui QUITTE l'arbre surveillé (ex: mis à la corbeille).
+                // inotify ne voit que le départ, pas la destination (hors scope).
+                // → Traiter comme une suppression.
+                EventKind::Modify(ModifyKind::Name(RenameMode::From)) => {
+                    event.paths.into_iter().next().map(WatchEvent::Deleted)
+                }
+
+                // Fichier qui ARRIVE dans l'arbre depuis l'extérieur (ex: mv depuis
+                // un autre dossier). inotify ne voit que l'arrivée.
+                // → Traiter comme une création/modification.
+                EventKind::Modify(ModifyKind::Name(RenameMode::To)) => {
+                    event.paths.into_iter().next().map(WatchEvent::Modified)
+                }
+
                 // Modification de contenu
                 EventKind::Modify(ModifyKind::Data(_)) => {
                     event.paths.into_iter().next().map(WatchEvent::Modified)

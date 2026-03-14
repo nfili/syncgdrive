@@ -22,6 +22,11 @@ SyncGDrive synchronise automatiquement un dossier local vers Google Drive
 
 ### Installation des dépendances
 
+**Arch Linux :**
+```bash
+sudo pacman -S gtk4 libadwaita kio-gdrive
+```
+
 **openSUSE / Fedora :**
 ```bash
 sudo zypper install gtk4-devel libadwaita-devel kio-gdrive
@@ -106,8 +111,8 @@ Liste des patterns glob à ignorer. Par défaut :
 
 | Option | Description | Défaut |
 |---|---|---|
-| **Workers parallèles** | Nombre de transferts simultanés (1–16) | 2 |
-| **Notifications bureau** | Affiche les notifications de progression | Désactivé |
+| **Workers parallèles** | Nombre de transferts simultanés (1–16) | 4 |
+| **Notifications bureau** | Affiche les notifications d'erreurs et de fin de sync | Désactivé |
 
 ### Validation
 
@@ -141,10 +146,17 @@ Survolez l'icône pour voir :
 
 | Action | Description |
 |---|---|
-| **Sync maintenant** | Force un rescan complet de tous les fichiers |
-| **Réglages…** | Ouvre la fenêtre de configuration |
-| **Voir les logs** | Ouvre le fichier de log dans l'éditeur par défaut |
-| **Quitter** | Arrêt propre du daemon |
+| *[État actuel]* | Ligne grisée affichant l'état du moteur |
+| **Synchroniser maintenant** | Force un rescan complet (si Idle) |
+| **⏸ Mettre en pause** | Suspend le moteur (si scan/transfert en cours) |
+| **▶ Reprendre** | Reprend la synchronisation (si en pause) |
+| **📂 Ouvrir le dossier local** | Ouvre le dossier surveillé dans Dolphin |
+| **☁ Ouvrir Google Drive** | Ouvre le Drive distant via `kioclient5 exec` |
+| **🚀 Lancer au démarrage** | Toggle `systemctl --user enable/disable` |
+| **⚙ Réglages…** | Ouvre la fenêtre de configuration (met en pause) |
+| **📄 Voir les logs** | Ouvre le dossier de logs |
+| **ℹ À propos** | Fenêtre libadwaita avec version et crédits |
+| **🛑 Quitter** | Arrêt propre du daemon |
 
 ---
 
@@ -237,7 +249,9 @@ max_backoff_ms = 8000
 |---|---|---|
 | Configuration | `~/.config/syncgdrive/config.toml` | Réglages de l'application |
 | Base de données | `~/.local/share/syncgdrive/index.db` | Index des fichiers synchronisés (SQLite) |
-| Logs | `~/.local/state/syncgdrive/syncgdrive.log` | Journal détaillé des opérations |
+| Logs | `~/.local/state/syncgdrive/logs/syncgdrive.log.*` | Rotation quotidienne, rétention 7 jours |
+| PID / Lock | `$XDG_RUNTIME_DIR/syncgdrive.lock` | Instance unique (flock + PID) |
+| Service systemd | `~/.config/systemd/user/syncgdrive.service` | Démarrage auto (optionnel) |
 
 > Les chemins suivent la convention **XDG** et peuvent être personnalisés
 > via `$XDG_CONFIG_HOME`, `$XDG_DATA_HOME`, `$XDG_STATE_HOME`.
@@ -251,11 +265,12 @@ max_backoff_ms = 8000
 ```bash
 # Depuis le systray : menu → Voir les logs
 
-# Ou directement :
-cat ~/.local/state/syncgdrive/syncgdrive.log
+# Ou directement (les fichiers sont nommés par date) :
+ls ~/.local/state/syncgdrive/logs/
+cat ~/.local/state/syncgdrive/logs/syncgdrive.log.2026-03-13
 
 # Suivre en temps réel :
-tail -f ~/.local/state/syncgdrive/syncgdrive.log
+tail -f ~/.local/state/syncgdrive/logs/syncgdrive.log.*
 ```
 
 ### Augmenter la verbosité
@@ -308,19 +323,18 @@ Les patterns utilisent la syntaxe **glob** :
 
 ## Notifications bureau
 
-Si activées dans les réglages, des notifications apparaissent pour :
+Politique de **silence par défaut** : les pop-ups sont réservés aux événements critiques.
+Les événements courants (scan, transfert, dossiers créés) sont affichés uniquement via le **tooltip** de la systray.
 
-| Événement | Message |
+Si activées dans les réglages :
+
+| Événement | Notification |
 |---|---|
-| Début du scan | « Inventaire de /chemin en cours… » |
-| Création dossiers | « Dossier 3/12 sur le Drive… » |
-| Scan terminé | « 12 dossiers, 156 fichiers à synchroniser, 340 déjà à jour » |
-| Transfert en cours | « 42/156 main.rs (4 Ko) » |
-| Sync terminée | « 156 fichier(s) transférés vers le Drive » |
-| Fichier modifié (watcher) | « ↑ main.rs synchronisé » |
-| Pause | « ⏸ Réglages ouverts. Reprendra à la fermeture. » |
-| Reprise | « ▶ La synchronisation a repris. » |
-| Erreur | « Erreur ⚠ — message KIO » |
+| Fin de sync initiale | ✅ Pop-up auto-dismiss 6s |
+| Jeton KIO expiré | ⚠ Sticky (reste à l'écran) |
+| Dossier local disparu | ⚠ Sticky + moteur en pause |
+| Quota dépassé | ⚠ Sticky |
+| Scan, transfert, pause… | Tooltip systray uniquement (pas de pop-up) |
 
 ---
 
@@ -330,7 +344,7 @@ Si activées dans les réglages, des notifications apparaissent pour :
 |---|---|
 | Menu systray → **Quitter** | Arrêt propre |
 | `Ctrl+C` dans le terminal | SIGINT → arrêt propre |
-| `kill <pid>` | SIGTERM → arrêt propre |
+| `kill $(cat $XDG_RUNTIME_DIR/syncgdrive.lock)` | SIGTERM → arrêt propre |
 | `kill -9 <pid>` | Arrêt forcé (déconseillé) |
 
 L'arrêt propre :
@@ -338,6 +352,31 @@ L'arrêt propre :
 2. Envoie SIGTERM aux processus `kioclient5` en vol
 3. Attend max 3 secondes que le moteur finisse
 4. Écrit les logs de fermeture
+
+## Service systemd (optionnel)
+
+Le fichier de référence est dans `dist/syncgdrive.service`.
+
+```bash
+# Installer le service
+cp dist/syncgdrive.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+
+# Activer le démarrage automatique
+systemctl --user enable syncgdrive.service
+
+# Démarrer maintenant
+systemctl --user start syncgdrive.service
+
+# Voir les logs systemd
+journalctl --user -u syncgdrive -f
+
+# Vérifier l'état
+systemctl --user status syncgdrive.service
+```
+
+Le toggle **Lancer au démarrage** dans le menu systray exécute
+`systemctl --user enable/disable` automatiquement.
 
 ---
 

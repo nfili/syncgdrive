@@ -33,24 +33,17 @@ La revue mentionne `glib::MainContext::channel` pour Moteur → UI. En réalité
 
 > La revue suggère : signaux `changed` + icônes ✅/❌ en temps réel.
 
-**État actuel** : la validation se fait uniquement au clic sur **Enregistrer** (`btn_save.connect_clicked`). Si le chemin est invalide, un toast apparaît.
+**État actuel** : ✅ **Implémenté dans `ui/settings.rs`.**
 
-**Verdict** : 🔧 **À implémenter.**
+Chaque champ affiche une icône suffix dynamique :
+- **Dossier local** : `emblem-ok-symbolic` si le chemin est un dossier existant, `dialog-error-symbolic` sinon (expand tilde supporté)
+- **URL distante** : `emblem-ok-symbolic` si le protocole est reconnu (`gdrive:/`, `smb://`, `sftp://`, `webdav://`, `ftp://`), `dialog-error-symbolic` sinon
+- **Bouton Enregistrer** grisé tant que les deux champs ne sont pas valides
+- Validation déclenchée à chaque frappe (`connect_changed`) + au chargement initial
 
-**Plan d'implémentation** (`src/ui/settings.rs`) :
+Fonctions helper : `is_local_valid()`, `is_remote_valid()`, `update_local_status()`, `update_remote_status()`, `update_save_sensitivity()`.
 
-1. Ajouter une icône suffix ✅/❌ sur `local_row` (à droite, avant le bouton Parcourir)
-2. Connecter `local_row.connect_changed(…)` :
-   - Expand tilde (`~/` → `/home/user/…`)
-   - Tester `Path::is_dir()`
-   - Mettre à jour l'icône suffix : `emblem-ok-symbolic` ou `dialog-error-symbolic`
-3. Ajouter une icône suffix ✅/❌ sur `remote_row`
-4. Connecter `remote_row.connect_changed(…)` :
-   - Tester que le texte commence par un protocole reconnu (`gdrive:/`, `smb://`, etc.)
-   - Mettre à jour l'icône suffix
-5. Griser le bouton **Enregistrer** (`btn_save.set_sensitive(false)`) tant que les deux champs ne sont pas valides
-
-**Priorité** : 🟡 Moyenne — améliore l'UX mais le toast au save fonctionne déjà.
+**Priorité** : ✅ Fait.
 
 ---
 
@@ -79,23 +72,24 @@ La suggestion `FileChooserNative` de la revue s'appliquait à **GTK3**, pas à n
 
 **État actuel** : noms d'icônes FreeDesktop standard (`emblem-default`, `emblem-synchronizing`, `dialog-warning`, `dialog-error`, `media-playback-pause`).
 
-**Verdict** : ⚠️ **Amélioration possible.**
+**Verdict** : ✅ **Implémenté dans `ui/tray.rs`.**
 
-Les icônes actuelles fonctionnent mais ne sont pas des variantes `-symbolic`. Sur KDE Plasma, les icônes symboliques s'adaptent mieux au mode clair/sombre et sont plus cohérentes visuellement dans le systray.
+Les icônes symboliques sont maintenant utilisées dans `icon_name()` :
 
-**Plan d'implémentation** (`src/ui/mod.rs`, `fn icon_name`) :
-
-| Actuel | Symbolique |
+| État | Icône symbolique |
 |---|---|
-| `emblem-default` | `emblem-ok-symbolic` |
-| `emblem-synchronizing` | `emblem-synchronizing-symbolic` |
-| `dialog-warning` | `dialog-warning-symbolic` |
-| `dialog-error` | `dialog-error-symbolic` |
-| `media-playback-pause` | `media-playback-pause-symbolic` |
+| Starting | `system-run-symbolic` |
+| Idle | `emblem-ok-symbolic` |
+| ScanProgress (Remote) | `network-server-symbolic` |
+| ScanProgress (Local) | `folder-saved-search-symbolic` |
+| ScanProgress (Dirs) | `folder-new-symbolic` |
+| ScanProgress (Compare) | `edit-find-replace-symbolic` |
+| SyncProgress/Syncing | `emblem-synchronizing-symbolic` |
+| Paused | `preferences-system-symbolic` |
+| Error | `dialog-error` |
+| Stopped | `system-shutdown-symbolic` |
 
-> **Attention** : ksni utilise le protocole StatusNotifierItem D-Bus qui transmet un `icon_name` au host Plasma. Les icônes `-symbolic` ne sont pas toujours disponibles dans ce contexte — tester sur le système cible avant de changer. Les noms actuels sont plus universels.
-
-**Priorité** : 🟢 Basse — cosmétique, à tester sur le Plasma du labo avant d'appliquer.
+**Priorité** : ✅ Fait.
 
 ---
 
@@ -115,16 +109,16 @@ Les icônes actuelles fonctionnent mais ne sont pas des variantes `-symbolic`. S
 | `Paused` | « Réglages ouverts. Reprendra à la fermeture. » |
 | `Error` | « *message* — Vérifiez les logs ou les tokens KIO. » |
 
-**Verdict** : ✅ **Déjà implémenté**, et plus riche que ce que la revue demandait.
+**Verdict** : ✅ **Implémenté dans `ui/tray.rs`.**
 
-Le seul ajout possible serait de mémoriser le **dernier fichier synchronisé** pour l'afficher en état `Idle`. C'est un plus cosmétique :
+Le champ `last_synced: String` est stocké dans `SyncTray`. Il est mis à jour à chaque `SyncProgress` via `handle.update()`. Le tooltip Idle affiche :
+```
+Surveillance active — Dossier à jour.
+/home/user/Projets → gdrive:/MonDrive/Backup
+✅ Dernier transfert : rapport.pdf
+```
 
-**Plan optionnel** :
-1. Ajouter un champ `last_synced: Option<String>` dans `EngineStatus::Idle` (ou un champ séparé dans `SyncTray`)
-2. Le worker pose le nom du fichier après un upload réussi
-3. Le tooltip Idle affiche « Surveillance active — dernier : rapport.pdf »
-
-**Priorité** : 🟢 Basse — le tooltip fonctionne déjà très bien.
+**Priorité** : ✅ Fait.
 
 ---
 
@@ -139,24 +133,13 @@ Le seul ajout possible serait de mémoriser le **dernier fichier synchronisé** 
 - Le thread **GTK Settings** (`gtk-settings`) est fire-and-forget : `app.run_with_args()` bloque puis `Resume` est envoyé
 - `main.rs` attend le moteur avec un **timeout 3s**, puis sort — les threads OS sont tués par `exit()`
 
-**Verdict** : ⚠️ **Fonctionnel mais pas chirurgical.**
+**Verdict** : ✅ **Implémenté dans `ui/tray.rs`.**
 
-Le thread ksni ne s'arrête jamais proprement — il est tué par la fin du processus. C'est acceptable car :
-- ksni n'a pas de ressources persistantes à libérer
-- Le host Plasma détecte la disparition du PID et retire l'icône
+Le systray est maintenant une tâche Tokio propre qui écoute le `CancellationToken` dans un `tokio::select!` avec `biased;`. Quand le shutdown est déclenché, la boucle sort et appelle `handle.shutdown().await` qui :
+1. Drop le handle ksni proprement
+2. Notifie le host D-Bus → icône retirée du systray avant la mort du processus
 
-**Plan d'amélioration** (`src/ui/mod.rs`) :
-
-1. Remplacer la boucle `sleep(3600)` du thread ksni par une attente sur le shutdown token :
-   ```
-   // Au lieu de : loop { sleep(3600) }
-   // Faire : while !shutdown.is_cancelled() { sleep(1) }
-   ```
-   Le handle ksni sera droppé proprement → D-Bus notifié → icône retirée du systray **avant** la mort du processus.
-
-2. Le thread GTK Settings est déjà correct : il bloque sur `app.run_with_args()`, puis envoie `Resume` et retourne. Pas de changement nécessaire.
-
-**Priorité** : 🟡 Moyenne — améliore la propreté de sortie sur KDE Plasma.
+**Priorité** : ✅ Fait.
 
 ---
 
@@ -187,18 +170,15 @@ Le timeout de 3s dans `main.rs` (lignes 103-108) couvre déjà le cas « le mote
 | # | Action | Fichier | Priorité | Effort |
 |---|---|---|---|---|
 | 1 | ~~Triangle de Fer~~ | — | ✅ Validé | — |
-| 2a | Validation live des champs Settings | `ui/settings.rs` | 🟡 Moyenne | ~60 lignes |
+| 2a | ~~Validation live Settings~~ | `ui/settings.rs` | ✅ Implémenté | — |
 | 2b | ~~FileChooserNative~~ | — | ✅ Déjà optimal (FileDialog GTK4) | — |
-| 3a | Icônes `-symbolic` (tester sur Plasma) | `ui/mod.rs` | 🟢 Basse | ~10 lignes |
-| 3b | ~~Tooltip dynamique~~ | — | ✅ Déjà implémenté | — |
-| 3b+ | Dernier fichier synchronisé dans tooltip Idle | `ui/mod.rs` + `engine/mod.rs` | 🟢 Basse | ~20 lignes |
-| 4a | Arrêt propre du thread ksni | `ui/mod.rs` | 🟡 Moyenne | ~10 lignes |
+| 3a | ~~Icônes `-symbolic`~~ | `ui/tray.rs` | ✅ Implémenté | — |
+| 3b | ~~Tooltip dynamique~~ | — | ✅ Implémenté | — |
+| 3b+ | ~~Dernier fichier dans tooltip Idle~~ | `ui/tray.rs` | ✅ Implémenté | — |
+| 4a | ~~Arrêt propre du thread ksni~~ | `ui/tray.rs` | ✅ Implémenté | — |
 | 4b | ~~Timeout join UI~~ | — | ✅ Non nécessaire (threads détachés) | — |
 
-### Ordre d'implémentation recommandé
+### Reste à faire
 
-1. **4a** — Arrêt propre ksni (rapide, améliore la propreté)
-2. **2a** — Validation live Settings (meilleure UX pour le premier lancement)
-3. **3a** — Icônes symboliques (cosmétique, à tester d'abord)
-4. **3b+** — Dernier fichier dans tooltip Idle (cosmétique)
+✅ **Tous les points du plan d'excellence sont implémentés.**
 
