@@ -26,6 +26,7 @@
 | 7 | [`07_UX_PREMIUM.md`](07_UX_PREMIUM.md) | Icônes SVG, Animation Systray, Fenêtre Scan, Chemins Lisibles | Phases 4, 5 | 📝 Rédigé |
 | 8 | [`08_DRY_RUN_TESTS.md`](08_DRY_RUN_TESTS.md) | Mode Dry-Run + Tests d'Intégration | Phases 1–7 | 📝 Rédigé |
 | 9 | [`09_PACKAGING.md`](09_PACKAGING.md) | Packaging PKGBUILD, .deb, PPA, .desktop | Phases 1–8 | 📝 Rédigé |
+| 10 | [`10_QA_MANUAL_TESTS.md`](10_QA_MANUAL_TESTS.md) | Procédure de Test Humain (149 tests QA) | Phases 1–9 | 📝 Rédigé |
 
 ---
 
@@ -47,6 +48,9 @@ Phase 1 (Config V2)
                                  │
                                  ▼
                           Phase 9 (Packaging)
+                                 │
+                                 ▼
+                          Phase 10 (QA Manuelle — 149 tests)
 ```
 
 ---
