@@ -79,5 +79,6 @@ pub mod ignore;
 pub mod kio;
 pub mod notif;
 pub mod migration;
+pub mod auth;
 #[cfg(feature = "ui")]
 pub mod ui;

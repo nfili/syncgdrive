@@ -30,6 +30,14 @@ time        = { version = "0.3", features = ["formatting"] }
 async-trait = "0.1"
 notify-rust = "4"
 libc         = "0.2"
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+oauth2 = "4.4"
+chrono = "0.4"
+keyring = "3.0"      # Stockage D-Bus / Secret Service
+aes-gcm = "0.10"     # Fallback : chiffrement fichier
+argon2 = "0.5"       # Fallback : dérivation de clé
+rand = "0.8"
+url = "2.5"
 
 [dev-dependencies]
 tempfile = "3"
