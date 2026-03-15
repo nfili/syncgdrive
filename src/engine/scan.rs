@@ -45,7 +45,7 @@ pub(crate) async fn run<K: KioOps>(
     });
 
     let t0 = std::time::Instant::now();
-    let remote_index = match kio.ls_remote(&format!("gdrive:/{}", cfg.sync_pairs[0].remote_folder_id)).await {
+    let remote_index = match kio.ls_remote(&cfg.sync_pairs[0].remote_folder_id).await {
         Ok(idx) => {
             info!(count = idx.len(), elapsed_ms = t0.elapsed().as_millis(), "scan: remote index built");
             idx
@@ -108,7 +108,7 @@ pub(crate) async fn run<K: KioOps>(
 
     // Charger les dossiers déjà connus de la DB (persisté entre les runs).
     // Cela évite les stat + mkdir pour les dossiers déjà créés lors d'un précédent scan.
-    let remote_prefix = format!("{}/", format!("gdrive:/{}", cfg.sync_pairs[0].remote_folder_id).trim_end_matches('/'));
+    let remote_prefix = format!("{}/",cfg.sync_pairs[0].remote_folder_id.trim_end_matches('/'));
     let db_clone = db.clone();
     let db_dirs = tokio::task::spawn_blocking(move || db_clone.all_dir_paths())
         .await
@@ -153,7 +153,7 @@ pub(crate) async fn run<K: KioOps>(
         }
 
         // Crée chaque composant manquant du chemin vers ce dossier.
-        let mut current = format!("gdrive:/{}", cfg.sync_pairs[0].remote_folder_id).trim_end_matches('/').to_string();
+        let mut current = cfg.sync_pairs[0].remote_folder_id.trim_end_matches('/').to_string();
         for component in rel.components() {
             let part = component.as_os_str().to_string_lossy();
             current = format!("{current}/{part}");
@@ -271,7 +271,7 @@ pub(crate) async fn run<K: KioOps>(
                     }
                 }
             }
-        } else if let Ok(remote_url) = to_remote(&format!("gdrive:/{}", cfg.sync_pairs[0].remote_folder_id), &cfg.sync_pairs[0].local_path, file_path) {
+        } else if let Ok(remote_url) = to_remote(&cfg.sync_pairs[0].remote_folder_id, &cfg.sync_pairs[0].local_path, file_path) {
             // Fichier absent de la DB locale — vérifier s'il existe déjà sur le remote.
             // Si oui, il a été synchronisé lors d'un précédent run (DB perdue ou
             // premier relancement). On l'enregistre dans la DB avec son hash+mtime
@@ -367,7 +367,7 @@ pub(crate) async fn run<K: KioOps>(
     // ou résidu d'un précédent run interrompu.
     // Garantit l'égalité : local = DB = remote.
     {
-        let remote_prefix = format!("{}/", format!("gdrive:/{}", cfg.sync_pairs[0].remote_folder_id).trim_end_matches('/'));
+        let remote_prefix = format!("{}/", cfg.sync_pairs[0].remote_folder_id.trim_end_matches('/'));
         let mut orphans_remote = 0usize;
 
         for remote_path in remote_index.iter() {

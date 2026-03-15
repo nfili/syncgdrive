@@ -2,55 +2,71 @@ use anyhow::{Context, Result};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
+use std::sync::atomic::{AtomicI32, Ordering};
 
-use sync_g_drive::config::AppConfig;
 use sync_g_drive::db::Database;
 use sync_g_drive::engine::{EngineCommand, EngineStatus, SyncEngine};
+use sync_g_drive::migration; // <-- Ajout de notre module de migration
 
 #[tokio::main]
 async fn main() -> Result<()> {
     // ── Instance unique (File Lock POSIX) ─────────────────────────────────
     let _lock = acquire_instance_lock();
 
-    let (cfg, is_first_run) = AppConfig::load_or_create().context("cannot load config")?;
-    let needs_config = cfg.validate().is_err();
-
+    // ── Initialisation des Logs (doit se faire très tôt) ──────────────────
     let log_dir = log_dir();
     cleanup_old_logs(&log_dir, 7);
     let _log_guard = init_logging(&log_dir)?;
 
+    // ── Phase 1 : Migration & Configuration ───────────────────────────────
+    let config_path = sync_g_drive::config::config_path();
+    let db_path_str = db_path();
+    let db_path_buf = std::path::Path::new(&db_path_str);
+
+    // On utilise l'orchestrateur de migration que nous avons créé
+    let cfg = migration::run_all_migrations(&config_path, db_path_buf)
+        .context("Échec lors de la migration ou du chargement de la configuration")?;
+
+    // On considère que c'est un premier run si la config vient d'être créée (et n'a pas de paires)
+    let is_first_run = !config_path.exists();
+    let needs_config = cfg.validate().is_err();
+
     if needs_config {
-        warn!(reason = %cfg.validate().unwrap_err(), "config invalide — ouvrez Settings");
+        if let Err(e) = cfg.validate() {
+            warn!(reason = %e, "config invalide — ouvrez Settings");
+        }
     } else {
-        info!(local = %cfg.local_root.display(), remote = %cfg.remote_root, "SyncGDrive démarrage");
+        // Logs mis à jour pour la V2 (utilisation de la première paire)
+        let active_pair = &cfg.sync_pairs[0];
+        info!(
+            local = %active_pair.local_path.display(),
+            remote_id = %active_pair.remote_folder_id,
+            "SyncGDrive V2 démarrage"
+        );
     }
 
-    let db = Database::open(std::path::Path::new(&db_path())).context("cannot open db")?;
-    db.init_schema()?;
+    // La base de données a déjà été migrée par `run_all_migrations`, on l'ouvre simplement
+    let db = Database::open(db_path_buf).context("cannot open db")?;
 
     let (cmd_tx, cmd_rx) = mpsc::channel::<EngineCommand>(32);
     let (status_tx, status_rx) = mpsc::unbounded_channel::<EngineStatus>();
     let shutdown = CancellationToken::new();
 
-    // Statut initial pour le systray (§1 UX_SYSTRAY.md : icône "Démarrage").
     let _ = status_tx.send(EngineStatus::Starting);
 
     // ── Signal SIGINT/SIGTERM via self-pipe trick ─────────────────────────────
-    // Technique POSIX classique : le handler de signal écrit 1 octet dans un pipe.
-    // Tokio lit ce pipe de façon async — pas de conflit avec ksni ou GTK.
     let signal_fd = {
         let mut fds = [0i32; 2];
         unsafe {
             libc::pipe(fds.as_mut_ptr());
             libc::fcntl(fds[1], libc::F_SETFL, libc::O_NONBLOCK);
         }
-        // Stocke le write-end dans une variable statique pour le handler
-        SIGNAL_PIPE_WRITE.store(fds[1], std::sync::atomic::Ordering::SeqCst);
+        SIGNAL_PIPE_WRITE.store(fds[1], Ordering::SeqCst);
         unsafe {
-            libc::signal(libc::SIGINT,  signal_handler as *const () as libc::sighandler_t);
-            libc::signal(libc::SIGTERM, signal_handler as *const () as libc::sighandler_t);
+            libc::signal(libc::SIGINT,  signal_handler as *const () as usize);
+            libc::signal(libc::SIGTERM, signal_handler as *const () as usize);
         }
-        fds[0] // read-end
+        fds[0]
     };
 
     // ── Moteur ────────────────────────────────────────────────────────────────
@@ -61,6 +77,7 @@ async fn main() -> Result<()> {
             db, shutdown.clone(), cmd_rx, status_tx,
         ))
     } else {
+        // Le SyncEngine prend maintenant la config complète
         tokio::spawn(SyncEngine::new(cfg.clone()).run(
             db, shutdown.clone(), cmd_rx, status_tx,
         ))
@@ -80,7 +97,6 @@ async fn main() -> Result<()> {
     }
     #[cfg(not(feature = "ui"))]
     {
-        // Sans UI : drainer les status pour ne pas accumuler en mémoire.
         let _ = (cfg, log_dir, is_first_run);
         tokio::spawn(async move {
             let mut status_rx = status_rx;
@@ -88,7 +104,7 @@ async fn main() -> Result<()> {
         });
     }
 
-    // ── Attente shutdown : pipe signal OU cancel depuis l'UI ─────────────────
+    // ── Attente shutdown ──────────────────────────────────────────────────────
     let async_fd = tokio::io::unix::AsyncFd::new(signal_fd)
         .context("AsyncFd on signal pipe")?;
     tokio::select! {
@@ -102,11 +118,10 @@ async fn main() -> Result<()> {
 
     let _ = cmd_tx.send(EngineCommand::Shutdown).await;
 
-    // Attend max 3s que le moteur finisse proprement, puis sort de toute façon.
     tokio::select! {
         _ = engine => { info!("moteur arrêté proprement"); }
         _ = tokio::time::sleep(std::time::Duration::from_secs(3)) => {
-            info!("timeout 3s dépassé — sortie forcée");
+            warn!("timeout 3s dépassé — sortie forcée");
         }
     }
 
@@ -115,20 +130,16 @@ async fn main() -> Result<()> {
 }
 
 // ── Self-pipe : write-end stocké en statique atomique ────────────────────────
-static SIGNAL_PIPE_WRITE: std::sync::atomic::AtomicI32 =
-    std::sync::atomic::AtomicI32::new(-1);
+static SIGNAL_PIPE_WRITE: AtomicI32 = AtomicI32::new(-1);
 
 extern "C" fn signal_handler(_sig: libc::c_int) {
-    let fd = SIGNAL_PIPE_WRITE.load(std::sync::atomic::Ordering::SeqCst);
+    let fd = SIGNAL_PIPE_WRITE.load(Ordering::SeqCst);
     if fd >= 0 {
         unsafe { libc::write(fd, c"".as_ptr() as *const libc::c_void, 1); }
     }
 }
 
 // ── Instance unique via flock POSIX ──────────────────────────────────────────
-
-/// Acquiert un verrou exclusif sur `$XDG_RUNTIME_DIR/syncgdrive.lock`.
-/// Si une autre instance tourne déjà → notification + exit(0).
 fn acquire_instance_lock() -> std::fs::File {
     use std::os::unix::io::AsRawFd;
 
@@ -147,10 +158,6 @@ fn acquire_instance_lock() -> std::fs::File {
     if ret != 0 {
         eprintln!("SyncGDrive est déjà en cours d'exécution.");
 
-        // CORRECTION : notify-rust utilise zbus::block_on() en interne.
-        // Sous #[tokio::main] le runtime est déjà actif → panic
-        // "Cannot start a runtime from within a runtime".
-        // On isole l'appel D-Bus dans un thread OS classique.
         std::thread::spawn(|| {
             let _ = notify_rust::Notification::new()
                 .appname("SyncGDrive")
@@ -164,8 +171,6 @@ fn acquire_instance_lock() -> std::fs::File {
         std::process::exit(0);
     }
 
-    // Écrit le PID dans le fichier lock (convention daemon POSIX).
-    // Tronque d'abord pour effacer un ancien PID plus long, puis écrit.
     use std::io::Write;
     file.set_len(0).ok();
     let _ = write!(file, "{}", std::process::id());
@@ -175,15 +180,12 @@ fn acquire_instance_lock() -> std::fs::File {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
-
 fn db_path() -> String {
     let dir = xdg_dir("XDG_DATA_HOME", ".local/share").join("syncgdrive");
     std::fs::create_dir_all(&dir).ok();
     dir.join("index.db").to_string_lossy().into_owned()
 }
 
-/// Retourne le RÉPERTOIRE de logs (pas un fichier).
-/// Les fichiers sont créés par `tracing_appender::rolling::daily`.
 fn log_dir() -> std::path::PathBuf {
     let dir = xdg_dir("XDG_STATE_HOME", ".local/state").join("syncgdrive").join("logs");
     std::fs::create_dir_all(&dir).ok();
@@ -197,7 +199,6 @@ fn xdg_dir(env: &str, fallback: &str) -> std::path::PathBuf {
     })
 }
 
-/// Supprime les fichiers de log > max_days dans le répertoire de logs.
 fn cleanup_old_logs(log_dir: &std::path::Path, max_days: u64) {
     let cutoff = std::time::SystemTime::now()
         - std::time::Duration::from_secs(max_days * 24 * 3600);
@@ -222,16 +223,17 @@ fn init_logging(log_dir: &std::path::Path) -> Result<tracing_appender::non_block
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("info,zbus=warn,globset=warn,glib=warn"));
 
+    // Restauration de TON format de temps précis
     let timer = time::format_description::parse("[hour]:[minute]:[second]").expect("time fmt");
     let timer = tracing_subscriber::fmt::time::UtcTime::new(timer);
 
     let stdout = fmt::layer().with_target(false).with_timer(timer.clone()).compact();
 
-    // Rotation quotidienne : syncgdrive.log.2026-03-13, etc.
+    // Rotation quotidienne : syncgdrive.log.2026-03-x
     let (writer, guard) = tracing_appender::non_blocking(
         tracing_appender::rolling::daily(log_dir, "syncgdrive.log")
     );
-    let file_layer = fmt::layer().with_target(true).with_timer(timer).with_ansi(false).with_writer(writer);
+    let file_layer = fmt::layer().with_target(true).with_ansi(false).with_writer(writer);
 
     tracing_subscriber::registry()
         .with(filter).with(stdout).with(file_layer)

@@ -181,11 +181,18 @@ impl ksni::Tray for SyncTray {
                 } else {
                     format!("\n✅ Dernier transfert : {}", self.last_synced)
                 };
+                let local_disp = cfg.sync_pairs.first()
+                    .map(|p| p.local_path.display().to_string())
+                    .unwrap_or_else(|| "Non configuré".into());
+
+                let remote_disp = cfg.sync_pairs.first()
+                    .map(|p| p.remote_folder_id.clone())
+                    .unwrap_or_else(|| "Aucun".into());
                 (
                     "SyncGDrive — Surveillance active".into(),
                     format!(
                         "Surveillance active — Dossier à jour.\n{} → {}{}",
-                        cfg.local_root.display(), cfg.remote_root, last
+                        local_disp, remote_disp, last
                     ),
                 )
             }
@@ -324,7 +331,10 @@ impl ksni::Tray for SyncTray {
 
         // ── 📂 Ouvrir le dossier local ───────────────────────────────────────
         {
-            let local = self.config.lock().unwrap().local_root.clone();
+            let local = self.config.lock().unwrap()
+            .sync_pairs.first()
+            .map(|p| p.local_path.clone())
+            .unwrap_or_default();
             items.push(StandardItem {
                 label: "📂 Ouvrir le dossier local".into(),
                 icon_name: "folder-open".into(),
@@ -337,7 +347,10 @@ impl ksni::Tray for SyncTray {
 
         // ── ☁ Ouvrir Google Drive ────────────────────────────────────────────
         {
-            let remote = self.config.lock().unwrap().remote_root.clone();
+            let remote = self.config.lock().unwrap()
+                .sync_pairs.first()
+                .map(|p| p.remote_folder_id.clone())
+                .unwrap_or_default();
             items.push(StandardItem {
                 label: "☁ Ouvrir Google Drive".into(),
                 icon_name: "folder-remote".into(),

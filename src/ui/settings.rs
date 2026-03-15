@@ -98,8 +98,12 @@ where
 
     let local_row = libadwaita::EntryRow::builder()
         .title("Dossier local")
-        .text(cfg.local_root.to_string_lossy().as_ref())
-        .build();
+        .text(
+            cfg.sync_pairs.first()
+                .map(|p| p.local_path.to_string_lossy().into_owned())
+                .unwrap_or_default()
+                .as_str() // <--- On force explicitement en &str
+        ).build();
 
     // Icône de validation live ✅/❌
     let local_status = gtk4::Image::builder()
@@ -137,8 +141,12 @@ where
 
     let remote_row = libadwaita::EntryRow::builder()
         .title("URL distante (ex: gdrive:/MonDrive/Backup)")
-        .text(&cfg.remote_root)
-        .build();
+        .text(
+            cfg.sync_pairs.first()
+                .map(|p| p.remote_folder_id.clone()) // <--- Correction : on pointe bien sur le remote_folder_id !
+                .unwrap_or_default()
+                .as_str() // <--- On force explicitement en &str
+        ).build();
 
     // Icône de validation live ✅/❌
     let remote_status = gtk4::Image::builder()
@@ -313,8 +321,19 @@ where
         let patterns = collect_patterns(&ignore_list2);
 
         let mut new_cfg = config2.lock().unwrap().clone();
-        new_cfg.local_root = std::path::PathBuf::from(&local);
-        new_cfg.remote_root = remote;
+        if new_cfg.sync_pairs.is_empty() {
+            new_cfg.sync_pairs.push(crate::config::SyncPair {
+                name: "Sync principal".into(),
+                local_path: std::path::PathBuf::from(&local),
+                remote_folder_id: remote,
+                provider: "GoogleDrive".into(),
+                active: true,
+                ignore_patterns: vec![],
+            });
+        } else {
+            new_cfg.sync_pairs[0].local_path = std::path::PathBuf::from(&local);
+            new_cfg.sync_pairs[0].remote_folder_id = remote;
+        }
         new_cfg.ignore_patterns = patterns;
         new_cfg.max_workers = workers_row.value() as usize;
         new_cfg.notifications = notif_row.is_active();

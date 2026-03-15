@@ -79,7 +79,7 @@ async fn sync_file<K: KioOps>(
     }
 
     // ── Copie vers le remote ──────────────────────────────────────────────────
-    let remote = to_remote(&format!("gdrive:/{}", cfg.sync_pairs[0].remote_folder_id), &cfg.sync_pairs[0].local_path, path)?;
+    let remote = to_remote(&cfg.sync_pairs[0].remote_folder_id, &cfg.sync_pairs[0].local_path, path)?;
 
     // Si on a un index distant (tâche issue du scan), utiliser copy_file_smart
     // pour éviter un `stat` individuel par fichier. Sinon (watcher), fallback
@@ -113,7 +113,7 @@ async fn delete<K: KioOps>(
         Ok(r) => r,
         Err(_) => return Ok(()),    // hors root
     };
-    let remote = to_remote(&format!("gdrive:/{}", cfg.sync_pairs[0].remote_folder_id), &cfg.sync_pairs[0].local_path, path)?;
+    let remote = to_remote(&cfg.sync_pairs[0].remote_folder_id, &cfg.sync_pairs[0].local_path, path)?;
 
     retry(cfg, shutdown, "delete", || async {
         kio.delete(&remote).await
@@ -164,8 +164,8 @@ async fn rename<K: KioOps>(
     }
 
     // ── Renommage classique (source connue en DB) ──────────────────────────
-    let from_remote = to_remote(&format!("gdrive:/{}", cfg.sync_pairs[0].remote_folder_id), &cfg.sync_pairs[0].local_path, from)?;
-    let to_remote   = to_remote(&format!("gdrive:/{}", cfg.sync_pairs[0].remote_folder_id), &cfg.sync_pairs[0].local_path, to)?;
+    let from_remote = to_remote(&cfg.sync_pairs[0].remote_folder_id, &cfg.sync_pairs[0].local_path, from)?;
+    let to_remote   = to_remote(&cfg.sync_pairs[0].remote_folder_id, &cfg.sync_pairs[0].local_path, to)?;
 
     retry(cfg, shutdown, "rename", || async {
         kio.rename(&from_remote, &to_remote).await
