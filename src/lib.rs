@@ -78,5 +78,6 @@ pub mod engine;
 pub mod ignore;
 pub mod kio;
 pub mod notif;
+pub mod migration;
 #[cfg(feature = "ui")]
 pub mod ui;

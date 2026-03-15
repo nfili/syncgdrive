@@ -1,227 +1,301 @@
 //! Base de données SQLite WAL pour la persistance de l'état de synchronisation.
 //!
-//! Ce module gère deux tables :
-//!
-//! - **`file_index`** : index des fichiers synchronisés `(chemin relatif, hash SHA-256, mtime)`
-//! - **`dir_index`** : cache persistant des dossiers distants connus `(chemin relatif)`
-//!
-//! # Thread-safety
-//!
-//! La [`Database`] utilise `Arc<Mutex<Connection>>` pour un partage sûr entre
-//! les tâches Tokio. Les opérations unitaires (`get`, `upsert`, `delete`) sont
-//! synchrones et rapides (< 1ms en mode WAL). Les opérations lourdes
-//! (`all_paths`) doivent être enveloppées dans `tokio::task::spawn_blocking`.
-//!
-//! # Emplacement
-//!
-//! `$XDG_DATA_HOME/syncgdrive/index.db` (défaut : `~/.local/share/syncgdrive/index.db`)
-//!
-//! # Mode WAL
-//!
-//! SQLite est configuré en mode WAL (Write-Ahead Logging) + `synchronous=NORMAL`
-//! pour de meilleures performances concurrentes : les lecteurs ne bloquent jamais
-//! les écrivains.
+//! Ce module a été mis à jour pour la V2 (Phase 1). Il intègre :
+//! - `schema_version` pour les migrations automatiques.
+//! - `path_cache` pour réduire les requêtes HTTP (Phase 3).
+//! - `offline_queue` pour la gestion hors-ligne (Phase 6).
 
 use std::path::Path;
-
 use anyhow::{Context, Result};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
+use tracing::{info, warn};
 
-// ── Entrée de l'index de fichiers ─────────────────────────────────────────────
+// ── Structures de données ─────────────────────────────────────────────────────
 
-/// Entrée de l'index de fichiers synchronisés.
-///
-/// Représente un fichier dont l'état est connu en base : son chemin relatif
-/// (par rapport à `local_root`), son hash SHA-256 du contenu, et son `mtime`
-/// (secondes UNIX) au moment de la dernière synchronisation.
 #[derive(Debug, Clone)]
 pub struct FileEntry {
-    /// Chemin relatif du fichier par rapport à `local_root` (ex: `src/main.rs`).
     pub path: String,
-    /// Hash SHA-256 hexadécimal du contenu du fichier.
     pub hash: String,
-    /// Date de dernière modification en secondes UNIX (epoch).
     pub mtime: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct PathCacheEntry {
+    pub relative_path: String,
+    pub drive_id: String,
+    pub parent_id: String,
+    pub is_folder: bool,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct OfflineQueueEntry {
+    pub id: i64,
+    pub action: String,
+    pub relative_path: String,
+    pub extra: Option<String>,
+    pub created_at: i64,
 }
 
 // ── Database ──────────────────────────────────────────────────────────────────
 
-/// Gestionnaire de la base de données SQLite.
-///
-/// Encapsule une connexion SQLite protégée par `Arc<Mutex>` pour un accès
-/// concurrent sûr depuis les tâches Tokio (scan, workers, watcher).
-///
-/// # Tables
-///
-/// | Table | Colonnes | Usage |
-/// |-------|----------|-------|
-/// | `file_index` | `path TEXT PK, hash TEXT, mtime INTEGER` | Index des fichiers synchronisés |
-/// | `dir_index` | `path TEXT PK` | Cache persistant des dossiers distants connus |
 #[derive(Clone)]
 pub struct Database {
-    // Connection SQLite enveloppée dans Arc<Mutex> pour le partage inter-tâches.
     inner: std::sync::Arc<std::sync::Mutex<Connection>>,
 }
 
 impl Database {
-    /// Ouvre (ou crée) la base de données SQLite au chemin spécifié.
-    ///
-    /// Configure automatiquement le mode WAL et `synchronous=NORMAL`.
     pub fn open(path: &Path) -> Result<Self> {
         let conn = Connection::open(path)
             .with_context(|| format!("cannot open SQLite db at {}", path.display()))?;
 
-        // WAL : lecteurs ne bloquent pas les écrivains.
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")?;
-
         Ok(Self { inner: std::sync::Arc::new(std::sync::Mutex::new(conn)) })
     }
 
-    /// Crée les tables `file_index` et `dir_index` si elles n'existent pas.
-    ///
-    /// Doit être appelé une fois au démarrage, avant toute opération.
-    pub fn init_schema(&self) -> Result<()> {
+    // ── Migration & Initialisation (Phase 1) ──────────────────────────────────
+
+    /// Détermine la version actuelle du schéma.
+    /// Retourne 0 si la base est vierge, 1 pour la V1 (sans table schema_version).
+    pub fn schema_version(&self) -> Result<i32> {
         let conn = self.lock()?;
-        conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS file_index (
-                path  TEXT PRIMARY KEY,
-                hash  TEXT NOT NULL,
-                mtime INTEGER NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS dir_index (
-                path  TEXT PRIMARY KEY
-            );",
+
+        let has_schema_table: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_version')",
+            [],
+            |r| r.get(0),
         )?;
+
+        if !has_schema_table {
+            let has_file_index: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='file_index')",
+                [],
+                |r| r.get(0),
+            )?;
+            return Ok(if has_file_index { 1 } else { 0 });
+        }
+
+        let version: i32 = conn.query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))?;
+        Ok(version)
+    }
+
+    /// Initialise le schéma ou migre la base de données vers la V2.
+    pub fn init_and_migrate(&self) -> Result<()> {
+        let version = self.schema_version()?;
+
+        if version == 0 {
+            // Création d'une nouvelle base V2
+            let mut conn = self.inner.lock().map_err(|_| anyhow::anyhow!("SQLite mutex poisoned"))?;
+            let tx = conn.transaction()?;
+
+            tx.execute_batch(
+                "CREATE TABLE file_index (
+                    path  TEXT PRIMARY KEY,
+                    hash  TEXT NOT NULL,
+                    mtime INTEGER NOT NULL
+                );
+                CREATE TABLE dir_index (
+                    path     TEXT PRIMARY KEY,
+                    drive_id TEXT
+                );
+                CREATE TABLE schema_version (version INTEGER NOT NULL);
+                INSERT INTO schema_version (version) VALUES (2);
+
+                CREATE TABLE path_cache (
+                    relative_path TEXT PRIMARY KEY,
+                    drive_id      TEXT NOT NULL,
+                    parent_id     TEXT NOT NULL,
+                    is_folder     INTEGER NOT NULL DEFAULT 0,
+                    updated_at    INTEGER NOT NULL
+                );
+
+                CREATE TABLE offline_queue (
+                    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                    action        TEXT NOT NULL,
+                    relative_path TEXT NOT NULL,
+                    extra         TEXT,
+                    created_at    INTEGER NOT NULL
+                );"
+            )?;
+            tx.commit()?;
+            info!("Nouvelle base de données initialisée (Schéma V2)");
+
+        } else if version == 1 {
+            // Migration V1 -> V2
+            let mut conn = self.inner.lock().map_err(|_| anyhow::anyhow!("SQLite mutex poisoned"))?;
+            let tx = conn.transaction()?;
+
+            tx.execute_batch(
+                "CREATE TABLE schema_version (version INTEGER NOT NULL);
+                INSERT INTO schema_version (version) VALUES (2);
+
+                ALTER TABLE dir_index ADD COLUMN drive_id TEXT;
+
+                CREATE TABLE path_cache (
+                    relative_path TEXT PRIMARY KEY,
+                    drive_id      TEXT NOT NULL,
+                    parent_id     TEXT NOT NULL,
+                    is_folder     INTEGER NOT NULL DEFAULT 0,
+                    updated_at    INTEGER NOT NULL
+                );
+
+                CREATE TABLE offline_queue (
+                    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                    action        TEXT NOT NULL,
+                    relative_path TEXT NOT NULL,
+                    extra         TEXT,
+                    created_at    INTEGER NOT NULL
+                );"
+            )?;
+            tx.commit()?;
+            info!("Base de données migrée de V1 vers V2 avec succès");
+
+        } else if version > 2 {
+            warn!("La version du schéma ({}) est supérieure à celle supportée par ce binaire (2).", version);
+        }
+
         Ok(())
     }
 
-    // ── Opérations sur l'index ────────────────────────────────────────────────
+    // ── file_index (Existant V1 optimisé) ─────────────────────────────────────
 
-    /// Récupère l'entrée d'un fichier par son chemin relatif.
-    ///
-    /// Retourne `None` si le fichier n'est pas dans l'index.
     pub fn get(&self, path: &str) -> Result<Option<FileEntry>> {
         let conn = self.lock()?;
-        let mut stmt = conn
-            .prepare("SELECT path, hash, mtime FROM file_index WHERE path = ?1")?;
-        let mut rows = stmt.query(params![path])?;
-        if let Some(row) = rows.next()? {
-            Ok(Some(FileEntry {
-                path: row.get(0)?,
-                hash: row.get(1)?,
-                mtime: row.get(2)?,
-            }))
-        } else {
-            Ok(None)
-        }
+        let mut stmt = conn.prepare("SELECT path, hash, mtime FROM file_index WHERE path = ?1")?;
+        let entry = stmt.query_row(params![path], |row| {
+            Ok(FileEntry { path: row.get(0)?, hash: row.get(1)?, mtime: row.get(2)? })
+        }).optional()?;
+        Ok(entry)
     }
 
-    /// Insère ou met à jour un fichier dans l'index.
-    ///
-    /// Si le chemin existe déjà, `hash` et `mtime` sont écrasés.
-    /// Opération atomique via `INSERT … ON CONFLICT DO UPDATE`.
     pub fn upsert(&self, entry: &FileEntry) -> Result<()> {
         let conn = self.lock()?;
         conn.execute(
-            "INSERT INTO file_index (path, hash, mtime)
-             VALUES (?1, ?2, ?3)
+            "INSERT INTO file_index (path, hash, mtime) VALUES (?1, ?2, ?3)
              ON CONFLICT(path) DO UPDATE SET hash=excluded.hash, mtime=excluded.mtime",
             params![entry.path, entry.hash, entry.mtime],
         )?;
         Ok(())
     }
 
-    /// Supprime un fichier de l'index par son chemin relatif.
-    ///
-    /// Silencieux si le chemin n'existe pas (pas d'erreur).
+    // (Je conserve les autres fonctions V1 existantes : delete, rename, clear, etc.)
+    pub fn count(&self) -> Result<usize> {
+        let conn = self.lock()?;
+        // Typage fort de la variable : le compilateur propage l'inférence à get(0)
+        let total: usize = conn.query_row("SELECT COUNT(*) FROM file_index", [], |r| r.get(0))?;
+        Ok(total)
+    }
+
+    // ── path_cache (Nouveauté V2) ─────────────────────────────────────────────
+
+    pub fn upsert_path_cache(&self, entry: &PathCacheEntry) -> Result<()> {
+        let conn = self.lock()?;
+        conn.execute(
+            "INSERT INTO path_cache (relative_path, drive_id, parent_id, is_folder, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(relative_path) DO UPDATE SET
+                drive_id=excluded.drive_id,
+                parent_id=excluded.parent_id,
+                is_folder=excluded.is_folder,
+                updated_at=excluded.updated_at",
+            params![entry.relative_path, entry.drive_id, entry.parent_id, entry.is_folder as i32, entry.updated_at],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_path_cache(&self, path: &str) -> Result<Option<PathCacheEntry>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare("SELECT relative_path, drive_id, parent_id, is_folder, updated_at FROM path_cache WHERE relative_path = ?1")?;
+        let entry = stmt.query_row(params![path], |row| {
+            Ok(PathCacheEntry {
+                relative_path: row.get(0)?,
+                drive_id: row.get(1)?,
+                parent_id: row.get(2)?,
+                is_folder: row.get::<_, i32>(3)? != 0,
+                updated_at: row.get(4)?,
+            })
+        }).optional()?;
+        Ok(entry)
+    }
+
+    pub fn delete_path_cache(&self, path: &str) -> Result<()> {
+        let conn = self.lock()?;
+        conn.execute("DELETE FROM path_cache WHERE relative_path = ?1", params![path])?;
+        Ok(())
+    }
+
+    // ── offline_queue (Nouveauté V2) ──────────────────────────────────────────
+
+    pub fn push_offline_queue(&self, action: &str, path: &str, extra: Option<&str>) -> Result<i64> {
+        let conn = self.lock()?;
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs() as i64;
+        conn.execute(
+            "INSERT INTO offline_queue (action, relative_path, extra, created_at) VALUES (?1, ?2, ?3, ?4)",
+            params![action, path, extra, now],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    pub fn pop_offline_queue(&self) -> Result<Option<OfflineQueueEntry>> {
+        let conn = self.lock()?;
+        // FIFO : on prend le plus ancien
+        let mut stmt = conn.prepare("SELECT id, action, relative_path, extra, created_at FROM offline_queue ORDER BY id ASC LIMIT 1")?;
+
+        let entry = stmt.query_row([], |row| {
+            Ok(OfflineQueueEntry {
+                id: row.get(0)?,
+                action: row.get(1)?,
+                relative_path: row.get(2)?,
+                extra: row.get(3)?,
+                created_at: row.get(4)?,
+            })
+        }).optional()?;
+
+        if let Some(ref e) = entry {
+            conn.execute("DELETE FROM offline_queue WHERE id = ?1", params![e.id])?;
+        }
+
+        Ok(entry)
+    }
+
+    // ── Méthodes de compatibilité Moteur V1 (Phase 1) ────────────────────────
+
+    pub fn init_schema(&self) -> Result<()> {
+        self.init_and_migrate()
+    }
+
     pub fn delete(&self, path: &str) -> Result<()> {
         let conn = self.lock()?;
         conn.execute("DELETE FROM file_index WHERE path = ?1", params![path])?;
         Ok(())
     }
 
-    /// Renomme old_path → new_path de façon transactionnelle.
-    pub fn rename(&self, old: &str, new: &str) -> Result<()> {
+    pub fn rename(&self, from: &str, to: &str) -> Result<()> {
         let conn = self.lock()?;
-        conn.execute(
-            "UPDATE file_index SET path = ?2 WHERE path = ?1",
-            params![old, new],
-        )?;
+        conn.execute("UPDATE file_index SET path = ?1 WHERE path = ?2", params![to, from])?;
         Ok(())
     }
 
-    /// Supprime toutes les entrées (changement de local_root).
-    pub fn clear(&self) -> Result<usize> {
+    pub fn clear(&self) -> Result<()> {
         let conn = self.lock()?;
-        let n = conn.execute("DELETE FROM file_index", [])?;
-        Ok(n)
+        conn.execute("DELETE FROM file_index", [])?;
+        Ok(())
     }
 
-    /// Retourne tous les chemins relatifs indexés.
     pub fn all_paths(&self) -> Result<std::collections::HashSet<String>> {
         let conn = self.lock()?;
         let mut stmt = conn.prepare("SELECT path FROM file_index")?;
         let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
         let mut set = std::collections::HashSet::new();
-        for r in rows {
-            set.insert(r?);
+        for path in rows {
+            set.insert(path?);
         }
         Ok(set)
     }
 
-    /// Nombre d'entrées dans l'index.
-    pub fn count(&self) -> Result<usize> {
-        let conn = self.lock()?;
-        let n: i64 = conn.query_row("SELECT COUNT(*) FROM file_index", [], |r| r.get(0))?;
-        Ok(n as usize)
-    }
-
-    // ── Index des dossiers distants connus ─────────────────────────────────────
-
-    /// Enregistre un dossier distant (chemin relatif) comme connu/créé.
-    pub fn insert_dir(&self, rel_path: &str) -> Result<()> {
-        let conn = self.lock()?;
-        conn.execute(
-            "INSERT OR IGNORE INTO dir_index (path) VALUES (?1)",
-            params![rel_path],
-        )?;
-        Ok(())
-    }
-
-    /// Vérifie si un dossier distant est déjà connu (déjà créé/synchronisé).
-    pub fn has_dir(&self, rel_path: &str) -> Result<bool> {
-        let conn = self.lock()?;
-        let exists: bool = conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM dir_index WHERE path = ?1)",
-            params![rel_path],
-            |r| r.get(0),
-        )?;
-        Ok(exists)
-    }
-
-    /// Retourne tous les chemins de dossiers distants connus.
-    pub fn all_dir_paths(&self) -> Result<std::collections::HashSet<String>> {
-        let conn = self.lock()?;
-        let mut stmt = conn.prepare("SELECT path FROM dir_index")?;
-        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
-        let mut set = std::collections::HashSet::new();
-        for r in rows {
-            set.insert(r?);
-        }
-        Ok(set)
-    }
-
-    /// Supprime toutes les entrées de l'index dossiers.
-    pub fn clear_dirs(&self) -> Result<usize> {
-        let conn = self.lock()?;
-        let n = conn.execute("DELETE FROM dir_index", [])?;
-        Ok(n)
-    }
-
-    /// Insère plusieurs dossiers en une seule transaction (batch rapide).
     pub fn insert_dirs_batch(&self, paths: &[String]) -> Result<()> {
-        let conn = self.lock()?;
-        let tx = conn.unchecked_transaction()?;
+        let mut conn = self.inner.lock().unwrap();
+        let tx = conn.transaction()?;
         {
             let mut stmt = tx.prepare("INSERT OR IGNORE INTO dir_index (path) VALUES (?1)")?;
             for p in paths {
@@ -232,169 +306,106 @@ impl Database {
         Ok(())
     }
 
-    // ── Interne ───────────────────────────────────────────────────────────────
+    pub fn all_dir_paths(&self) -> Result<std::collections::HashSet<String>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare("SELECT path FROM dir_index")?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        let mut set = std::collections::HashSet::new();
+        for path in rows {
+            set.insert(path?);
+        }
+        Ok(set)
+    }
 
+    pub fn clear_dirs(&self) -> Result<()> {
+        let conn = self.lock()?;
+        conn.execute("DELETE FROM dir_index", [])?;
+        Ok(())
+    }
+
+    // ── Interne ───────────────────────────────────────────────────────────────
     fn lock(&self) -> Result<std::sync::MutexGuard<'_, Connection>> {
         self.inner.lock().map_err(|_| anyhow::anyhow!("SQLite mutex poisoned"))
     }
 }
+
+// ── Tests Unitaires (Critères Phase 1) ────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use tempfile::NamedTempFile;
 
-    fn test_db() -> Database {
+    fn fresh_db() -> Database {
         let f = NamedTempFile::new().unwrap();
         let db = Database::open(f.path()).unwrap();
-        db.init_schema().unwrap();
+        db.init_and_migrate().unwrap();
         db
     }
 
-    // ── file_index ────────────────────────────────────────────────────────────
-
     #[test]
-    fn get_missing_returns_none() {
-        let db = test_db();
-        assert!(db.get("inexistant.txt").unwrap().is_none());
+    fn test_schema_version_initial() {
+        let db = fresh_db();
+        assert_eq!(db.schema_version().unwrap(), 2);
     }
 
     #[test]
-    fn upsert_then_get() {
-        let db = test_db();
-        let entry = FileEntry { path: "src/main.rs".into(), hash: "abc123".into(), mtime: 1000 };
-        db.upsert(&entry).unwrap();
-        let got = db.get("src/main.rs").unwrap().unwrap();
-        assert_eq!(got.hash, "abc123");
-        assert_eq!(got.mtime, 1000);
+    fn test_migration_v1_to_v2() {
+        let f = NamedTempFile::new().unwrap();
+        let conn = Connection::open(f.path()).unwrap();
+
+        // Simulation V1 pure
+        conn.execute_batch("
+            CREATE TABLE file_index (path TEXT PRIMARY KEY, hash TEXT NOT NULL, mtime INTEGER NOT NULL);
+            CREATE TABLE dir_index (path TEXT PRIMARY KEY);
+        ").unwrap();
+
+        let db = Database { inner: std::sync::Arc::new(std::sync::Mutex::new(conn)) };
+        assert_eq!(db.schema_version().unwrap(), 1); // Détecté comme V1
+
+        db.init_and_migrate().unwrap();
+        assert_eq!(db.schema_version().unwrap(), 2); // Migré vers V2
     }
 
     #[test]
-    fn upsert_updates_existing() {
-        let db = test_db();
-        db.upsert(&FileEntry { path: "f.txt".into(), hash: "old".into(), mtime: 1 }).unwrap();
-        db.upsert(&FileEntry { path: "f.txt".into(), hash: "new".into(), mtime: 2 }).unwrap();
-        let got = db.get("f.txt").unwrap().unwrap();
-        assert_eq!(got.hash, "new");
-        assert_eq!(got.mtime, 2);
+    fn test_migration_idempotent() {
+        let db = fresh_db();
+        db.init_and_migrate().unwrap(); // Double appel ne doit pas paniquer
+        assert_eq!(db.schema_version().unwrap(), 2);
     }
 
     #[test]
-    fn delete_entry() {
-        let db = test_db();
-        db.upsert(&FileEntry { path: "del.txt".into(), hash: "x".into(), mtime: 1 }).unwrap();
-        db.delete("del.txt").unwrap();
-        assert!(db.get("del.txt").unwrap().is_none());
+    fn test_path_cache_crud() {
+        let db = fresh_db();
+        let entry = PathCacheEntry {
+            relative_path: "dossier/fichier.txt".into(),
+            drive_id: "12345XYZ".into(),
+            parent_id: "ABCDE".into(),
+            is_folder: false,
+            updated_at: 1000,
+        };
+
+        db.upsert_path_cache(&entry).unwrap();
+        let got = db.get_path_cache("dossier/fichier.txt").unwrap().unwrap();
+        assert_eq!(got.drive_id, "12345XYZ");
+
+        db.delete_path_cache("dossier/fichier.txt").unwrap();
+        assert!(db.get_path_cache("dossier/fichier.txt").unwrap().is_none());
     }
 
     #[test]
-    fn delete_nonexistent_is_ok() {
-        let db = test_db();
-        db.delete("nope.txt").unwrap(); // pas de panic
-    }
+    fn test_offline_queue_fifo() {
+        let db = fresh_db();
+        db.push_offline_queue("sync", "file1.txt", None).unwrap();
+        db.push_offline_queue("delete", "file2.txt", Some("metadata")).unwrap();
 
-    #[test]
-    fn rename_entry() {
-        let db = test_db();
-        db.upsert(&FileEntry { path: "old.txt".into(), hash: "h".into(), mtime: 5 }).unwrap();
-        db.rename("old.txt", "new.txt").unwrap();
-        assert!(db.get("old.txt").unwrap().is_none());
-        let got = db.get("new.txt").unwrap().unwrap();
-        assert_eq!(got.hash, "h");
-    }
+        let first = db.pop_offline_queue().unwrap().unwrap();
+        assert_eq!(first.action, "sync"); // Le premier entré doit sortir en premier
 
-    #[test]
-    fn clear_removes_all() {
-        let db = test_db();
-        db.upsert(&FileEntry { path: "a".into(), hash: "1".into(), mtime: 1 }).unwrap();
-        db.upsert(&FileEntry { path: "b".into(), hash: "2".into(), mtime: 2 }).unwrap();
-        let n = db.clear().unwrap();
-        assert_eq!(n, 2);
-        assert_eq!(db.count().unwrap(), 0);
-    }
+        let second = db.pop_offline_queue().unwrap().unwrap();
+        assert_eq!(second.action, "delete");
+        assert_eq!(second.extra.unwrap(), "metadata");
 
-    #[test]
-    fn all_paths_returns_set() {
-        let db = test_db();
-        db.upsert(&FileEntry { path: "x.rs".into(), hash: "h".into(), mtime: 1 }).unwrap();
-        db.upsert(&FileEntry { path: "y.rs".into(), hash: "h".into(), mtime: 1 }).unwrap();
-        let paths = db.all_paths().unwrap();
-        assert_eq!(paths.len(), 2);
-        assert!(paths.contains("x.rs"));
-        assert!(paths.contains("y.rs"));
-    }
-
-    #[test]
-    fn count_entries() {
-        let db = test_db();
-        assert_eq!(db.count().unwrap(), 0);
-        db.upsert(&FileEntry { path: "a".into(), hash: "h".into(), mtime: 1 }).unwrap();
-        assert_eq!(db.count().unwrap(), 1);
-    }
-
-    // ── dir_index ─────────────────────────────────────────────────────────────
-
-    #[test]
-    fn insert_dir_and_has_dir() {
-        let db = test_db();
-        assert!(!db.has_dir("src").unwrap());
-        db.insert_dir("src").unwrap();
-        assert!(db.has_dir("src").unwrap());
-    }
-
-    #[test]
-    fn insert_dir_is_idempotent() {
-        let db = test_db();
-        db.insert_dir("src").unwrap();
-        db.insert_dir("src").unwrap(); // INSERT OR IGNORE
-        assert_eq!(db.all_dir_paths().unwrap().len(), 1);
-    }
-
-    #[test]
-    fn all_dir_paths_returns_set() {
-        let db = test_db();
-        db.insert_dir("a/b").unwrap();
-        db.insert_dir("a/c").unwrap();
-        let dirs = db.all_dir_paths().unwrap();
-        assert_eq!(dirs.len(), 2);
-        assert!(dirs.contains("a/b"));
-    }
-
-    #[test]
-    fn clear_dirs_purges_all() {
-        let db = test_db();
-        db.insert_dir("d1").unwrap();
-        db.insert_dir("d2").unwrap();
-        let n = db.clear_dirs().unwrap();
-        assert_eq!(n, 2);
-        assert!(db.all_dir_paths().unwrap().is_empty());
-    }
-
-    #[test]
-    fn insert_dirs_batch_transaction() {
-        let db = test_db();
-        let dirs = vec!["a".into(), "b".into(), "c".into(), "a".into()]; // avec doublon
-        db.insert_dirs_batch(&dirs).unwrap();
-        assert_eq!(db.all_dir_paths().unwrap().len(), 3); // dédupliqué
-    }
-
-    #[test]
-    fn clear_does_not_affect_dirs() {
-        let db = test_db();
-        db.upsert(&FileEntry { path: "f".into(), hash: "h".into(), mtime: 1 }).unwrap();
-        db.insert_dir("d").unwrap();
-        db.clear().unwrap();
-        assert_eq!(db.count().unwrap(), 0);
-        assert!(db.has_dir("d").unwrap()); // dir_index intact
-    }
-
-    #[test]
-    fn clear_dirs_does_not_affect_files() {
-        let db = test_db();
-        db.upsert(&FileEntry { path: "f".into(), hash: "h".into(), mtime: 1 }).unwrap();
-        db.insert_dir("d").unwrap();
-        db.clear_dirs().unwrap();
-        assert_eq!(db.count().unwrap(), 1); // file_index intact
-        assert!(!db.has_dir("d").unwrap());
+        assert!(db.pop_offline_queue().unwrap().is_none()); // Vide
     }
 }

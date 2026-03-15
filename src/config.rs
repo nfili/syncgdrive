@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tracing::{info, warn};
+use tracing::{info};
 
 // ── Valeurs par défaut (strictement selon 01_CONFIG_V2.md) ──────────────────
 

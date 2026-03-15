@@ -36,7 +36,7 @@ pub(crate) async fn run<K: KioOps>(
     shutdown: &CancellationToken,
     status_tx: &mpsc::UnboundedSender<EngineStatus>,
 ) -> Result<()> {
-    info!(root = %cfg.local_root.display(), "scan: start");
+    info!(root = %cfg.sync_pairs[0].local_path.display(), "scan: start");
     notif::scan_started(cfg);
 
     // ── Phase 0 : listing récursif du remote (un seul ls par dossier) ─────────
@@ -45,7 +45,7 @@ pub(crate) async fn run<K: KioOps>(
     });
 
     let t0 = std::time::Instant::now();
-    let remote_index = match kio.ls_remote(&cfg.remote_root).await {
+    let remote_index = match kio.ls_remote(&format!("gdrive:/{}", cfg.sync_pairs[0].remote_folder_id)).await {
         Ok(idx) => {
             info!(count = idx.len(), elapsed_ms = t0.elapsed().as_millis(), "scan: remote index built");
             idx
@@ -66,7 +66,7 @@ pub(crate) async fn run<K: KioOps>(
     let mut local_files: Vec<PathBuf> = Vec::new();
     let mut local_count = 0usize;
 
-    for entry in WalkDir::new(&cfg.local_root)
+    for entry in WalkDir::new(&cfg.sync_pairs[0].local_path)
         .into_iter()
         .filter_entry(|e| !ignore.is_ignored(e.path()))
         .filter_map(|e| e.ok())
@@ -76,7 +76,7 @@ pub(crate) async fn run<K: KioOps>(
         }
         let path = entry.path().to_path_buf();
         if entry.file_type().is_dir() {
-            if let Ok(r) = path.strip_prefix(&cfg.local_root) {
+            if let Ok(r) = path.strip_prefix(&cfg.sync_pairs[0].local_path) {
                 if !r.as_os_str().is_empty() {
                     local_dirs.push(path);
                 }
@@ -108,7 +108,7 @@ pub(crate) async fn run<K: KioOps>(
 
     // Charger les dossiers déjà connus de la DB (persisté entre les runs).
     // Cela évite les stat + mkdir pour les dossiers déjà créés lors d'un précédent scan.
-    let remote_prefix = format!("{}/", cfg.remote_root.trim_end_matches('/'));
+    let remote_prefix = format!("{}/", format!("gdrive:/{}", cfg.sync_pairs[0].remote_folder_id).trim_end_matches('/'));
     let db_clone = db.clone();
     let db_dirs = tokio::task::spawn_blocking(move || db_clone.all_dir_paths())
         .await
@@ -136,7 +136,7 @@ pub(crate) async fn run<K: KioOps>(
         if shutdown.is_cancelled() {
             anyhow::bail!("shutdown: scan interrupted");
         }
-        let rel = dir_path.strip_prefix(&cfg.local_root).unwrap();
+        let rel = dir_path.strip_prefix(&cfg.sync_pairs[0].local_path).unwrap();
         let dir_name = rel.file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_default();
@@ -153,7 +153,7 @@ pub(crate) async fn run<K: KioOps>(
         }
 
         // Crée chaque composant manquant du chemin vers ce dossier.
-        let mut current = cfg.remote_root.trim_end_matches('/').to_string();
+        let mut current = format!("gdrive:/{}", cfg.sync_pairs[0].remote_folder_id).trim_end_matches('/').to_string();
         for component in rel.components() {
             let part = component.as_os_str().to_string_lossy();
             current = format!("{current}/{part}");
@@ -234,7 +234,7 @@ pub(crate) async fn run<K: KioOps>(
             anyhow::bail!("shutdown: scan interrupted");
         }
 
-        let rel = match file_path.strip_prefix(&cfg.local_root) {
+        let rel = match file_path.strip_prefix(&cfg.sync_pairs[0].local_path) {
             Ok(r) => r.to_string_lossy().to_string(),
             Err(_) => continue,
         };
@@ -271,7 +271,7 @@ pub(crate) async fn run<K: KioOps>(
                     }
                 }
             }
-        } else if let Ok(remote_url) = to_remote(&cfg.remote_root, &cfg.local_root, file_path) {
+        } else if let Ok(remote_url) = to_remote(&format!("gdrive:/{}", cfg.sync_pairs[0].remote_folder_id), &cfg.sync_pairs[0].local_path, file_path) {
             // Fichier absent de la DB locale — vérifier s'il existe déjà sur le remote.
             // Si oui, il a été synchronisé lors d'un précédent run (DB perdue ou
             // premier relancement). On l'enregistre dans la DB avec son hash+mtime
@@ -334,7 +334,7 @@ pub(crate) async fn run<K: KioOps>(
     // ── Ensemble de référence : tous les chemins relatifs locaux ─────────────
     // Utilisé par Phase 5 (orphelins DB) et Phase 6 (orphelins remote).
     let local_rel_set: HashSet<String> = local_files.iter()
-        .filter_map(|p| p.strip_prefix(&cfg.local_root).ok())
+        .filter_map(|p| p.strip_prefix(&cfg.sync_pairs[0].local_path).ok())
         .map(|r| r.to_string_lossy().to_string())
         .collect();
 
@@ -349,7 +349,7 @@ pub(crate) async fn run<K: KioOps>(
                 anyhow::bail!("shutdown: scan interrupted");
             }
             if !local_rel_set.contains(db_path) {
-                let full_local = cfg.local_root.join(db_path);
+                let full_local = cfg.sync_pairs[0].local_path.join(db_path);
                 if task_tx.send(Task::Delete(full_local)).await.is_err() {
                     anyhow::bail!("shutdown: task queue closed");
                 }
@@ -367,7 +367,7 @@ pub(crate) async fn run<K: KioOps>(
     // ou résidu d'un précédent run interrompu.
     // Garantit l'égalité : local = DB = remote.
     {
-        let remote_prefix = format!("{}/", cfg.remote_root.trim_end_matches('/'));
+        let remote_prefix = format!("{}/", format!("gdrive:/{}", cfg.sync_pairs[0].remote_folder_id).trim_end_matches('/'));
         let mut orphans_remote = 0usize;
 
         for remote_path in remote_index.iter() {
@@ -387,7 +387,7 @@ pub(crate) async fn run<K: KioOps>(
             if local_rel_set.contains(rel) { continue; }
 
             // Si c'est un dossier local connu → pas un fichier orphelin.
-            let local_path = cfg.local_root.join(rel);
+            let local_path = cfg.sync_pairs[0].local_path.join(rel);
             if local_path.is_dir() { continue; }
 
             // Si le fichier est dans la DB, Phase 5 gère déjà → skip.

@@ -95,7 +95,7 @@ impl SyncEngine {
     ) -> Result<()> {
         let kio = KioClient::new(
             shutdown.clone(),
-            std::time::Duration::from_secs(self.cfg.kio_timeout_secs),
+            std::time::Duration::from_secs(self.cfg.advanced.shutdown_timeout_secs),
         );
         self.run_with_kio(kio, db, shutdown, cmd_rx, status_tx).await
     }
@@ -176,7 +176,7 @@ impl SyncEngine {
 
         // ── Watcher inotify ───────────────────────────────────────────────────
         let (watch_tx, watch_rx) = mpsc::channel(256);
-        let mut watcher = watcher::Watcher::start(&self.cfg.local_root, watch_tx)?;
+        let mut watcher = watcher::Watcher::start(&self.cfg.sync_pairs[0].local_path, watch_tx)?;
 
         // Dispatch watcher → task queue (avec debounce 500ms sur Modified)
         let task_tx_w = task_tx.clone();
@@ -249,8 +249,8 @@ impl SyncEngine {
                                 break;
                             }
                             Some(EngineCommand::ApplyConfig(new_cfg)) => {
-                                info!(local = %new_cfg.local_root.display(), "engine: config hot-reload (while paused)");
-                                let root_changed = new_cfg.local_root != self.cfg.local_root;
+                                info!(local = %new_cfg.sync_pairs[0].local_path.display(), "engine: config hot-reload (while paused)");
+                                let root_changed = new_cfg.sync_pairs[0].local_path != self.cfg.sync_pairs[0].local_path;
                                 self.cfg = new_cfg;
                                 rescan_on_resume = true;
                                 if root_changed {
@@ -258,7 +258,7 @@ impl SyncEngine {
                                     db.clear()?;
                                     db.clear_dirs()?;
                                     let (tx2, rx2) = mpsc::channel(256);
-                                    watcher = watcher::Watcher::start(&self.cfg.local_root, tx2)?;
+                                    watcher = watcher::Watcher::start(&self.cfg.sync_pairs[0].local_path, tx2)?;
                                     spawn_debounced_dispatch(rx2, task_tx.clone(), shutdown.clone());
                                 }
                             }
@@ -307,8 +307,8 @@ impl SyncEngine {
                             }
                         }
                         Some(EngineCommand::ApplyConfig(new_cfg)) => {
-                            info!(local = %new_cfg.local_root.display(), "engine: config hot-reload");
-                            let root_changed = new_cfg.local_root != self.cfg.local_root;
+                            info!(local = %new_cfg.sync_pairs[0].local_path.display(), "engine: config hot-reload");
+                            let root_changed = new_cfg.sync_pairs[0].local_path != self.cfg.sync_pairs[0].local_path;
                             self.cfg = new_cfg;
 
                             if root_changed {
@@ -316,7 +316,7 @@ impl SyncEngine {
                                 db.clear()?;
                                 db.clear_dirs()?;
                                 let (tx2, rx2) = mpsc::channel(256);
-                                watcher = watcher::Watcher::start(&self.cfg.local_root, tx2)?;
+                                watcher = watcher::Watcher::start(&self.cfg.sync_pairs[0].local_path, tx2)?;
                                 // Re-dispatch avec debounce
                                 spawn_debounced_dispatch(rx2, task_tx.clone(), shutdown.clone());
                                 // Rescan
@@ -342,8 +342,8 @@ impl SyncEngine {
                 // ── Tick 30s : vérification santé + rescan si overflow ────────
                 _ = overflow_tick.tick() => {
                     // §4B UX_SYSTRAY.md : dossier local disparu → notification + pause
-                    if !self.cfg.local_root.is_dir() {
-                        let path_str = self.cfg.local_root.display().to_string();
+                    if !self.cfg.sync_pairs[0].local_path.is_dir() {
+                        let path_str = self.cfg.sync_pairs[0].local_path.display().to_string();
                         error!(path = %path_str, "local_root disparu — moteur en pause");
                         crate::notif::folder_missing(&self.cfg, &path_str);
                         let _ = status_tx.send(EngineStatus::Error(
@@ -597,7 +597,7 @@ pub async fn run_unconfigured(
                                 let _ = status_tx.send(EngineStatus::Unconfigured(e.to_string()));
                             }
                             Ok(()) => {
-                                info!(local = %cfg.local_root.display(), "valid config received, starting engine");
+                                info!(local = %cfg.sync_pairs[0].local_path.display(), "valid config received, starting engine");
                                 let engine = SyncEngine::new(cfg);
                                 return engine.run(db, shutdown, cmd_rx, status_tx).await;
                             }
