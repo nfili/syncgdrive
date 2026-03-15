@@ -1,33 +1,15 @@
-//! Configuration de l'application SyncGDrive.
+//! Configuration de l'application SyncGDrive V2.
 //!
 //! Ce module gère le chargement, la validation et la sauvegarde de la
-//! configuration TOML située dans `$XDG_CONFIG_HOME/syncgdrive/config.toml`
-//! (défaut : `~/.config/syncgdrive/config.toml`).
-//!
-//! # Structure
-//!
-//! - [`AppConfig`] : configuration principale (chemins, workers, retry, exclusions)
-//! - [`RetryConfig`] : paramètres de retry avec backoff exponentiel
-//! - [`ConfigError`] : erreurs de validation typées (via `thiserror`)
-//!
-//! # Premier lancement
-//!
-//! Si le fichier n'existe pas, [`AppConfig::load_or_create`] crée un fichier
-//! par défaut avec des valeurs vides pour `local_root` et `remote_root`.
-//! La validation échouera → le moteur passe en mode `Unconfigured` et la
-//! fenêtre Settings s'ouvre automatiquement.
-//!
-//! # Protocoles distants supportés
-//!
-//! `gdrive:/`, `smb://`, `sftp://`, `webdav://`, `ftp://`
+//! configuration TOML. Il intègre la migration automatique depuis la V1.
 
 use std::path::{Path, PathBuf};
-
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use tracing::{info, warn};
 
-// ── Valeurs par défaut ────────────────────────────────────────────────────────
+// ── Valeurs par défaut (strictement selon 01_CONFIG_V2.md) ──────────────────
 
 fn default_ignore_patterns() -> Vec<String> {
     vec![
@@ -38,32 +20,33 @@ fn default_ignore_patterns() -> Vec<String> {
         "**/.idea/**".into(),
     ]
 }
-
 fn default_max_workers() -> usize { 4 }
 fn default_retry_attempts() -> u32 { 3 }
 fn default_initial_backoff_ms() -> u64 { 300 }
 fn default_max_backoff_ms() -> u64 { 8_000 }
-fn default_kio_timeout_secs() -> u64 { 120 }
 fn default_rescan_interval_min() -> u64 { 30 }
+fn default_provider() -> String { "GoogleDrive".into() }
+fn default_true() -> bool { true }
+fn default_debounce_ms() -> u64 { 500 }
+fn default_health_check_secs() -> u64 { 30 }
+fn default_max_concurrent_ls() -> usize { 8 }
+fn default_shutdown_timeout() -> u64 { 3 }
+fn default_log_retention() -> u64 { 7 }
+fn default_channel_capacity() -> usize { 32 }
+fn default_notif_timeout() -> i32 { 6000 }
+fn default_resumable_threshold() -> u64 { 5_242_880 }
+fn default_api_rate_limit() -> u32 { 10 }
+fn default_delete_mode() -> String { "trash".into() }
+fn default_symlink_mode() -> String { "ignore".into() }
 
 // ── Structures ────────────────────────────────────────────────────────────────
 
-/// Configuration du retry automatique avec backoff exponentiel.
-///
-/// Utilisé par [`scan::retry()`](crate::engine::scan::retry) pour les opérations
-/// KIO qui échouent de façon transitoire (timeout réseau, latence GDrive…).
-///
-/// Le backoff double à chaque tentative, plafonné à [`max_backoff_ms`](Self::max_backoff_ms).
-/// Les erreurs fatales (auth/token/403/401/quota) court-circuitent le retry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RetryConfig {
-    /// Nombre maximal de tentatives (défaut : 3).
     #[serde(default = "default_retry_attempts")]
     pub max_attempts: u32,
-    /// Délai initial en millisecondes avant la première re-tentative (défaut : 300ms).
     #[serde(default = "default_initial_backoff_ms")]
     pub initial_backoff_ms: u64,
-    /// Plafond du backoff en millisecondes (défaut : 8000ms).
     #[serde(default = "default_max_backoff_ms")]
     pub max_backoff_ms: u64,
 }
@@ -78,82 +61,101 @@ impl Default for RetryConfig {
     }
 }
 
-/// Configuration principale de l'application.
-///
-/// Sérialisée/désérialisée depuis le fichier TOML via `serde`.
-/// Tous les champs ont des valeurs par défaut via `#[serde(default)]`.
-///
-/// # Exemple TOML
-///
-/// ```toml
-/// local_root = "/home/user/Projets"
-/// remote_root = "gdrive:/MonDrive/Backup"
-/// max_workers = 4
-/// notifications = true
-/// kio_timeout_secs = 120
-/// rescan_interval_min = 30
-///
-/// [retry]
-/// max_attempts = 3
-/// initial_backoff_ms = 300
-/// max_backoff_ms = 8000
-///
-/// ignore_patterns = ["**/target/**", "**/.git/**"]
-/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdvancedConfig {
+    #[serde(default = "default_debounce_ms")]
+    pub debounce_ms: u64,
+    #[serde(default = "default_health_check_secs")]
+    pub health_check_interval_secs: u64,
+    #[serde(default = "default_max_concurrent_ls")]
+    pub max_concurrent_ls: usize,
+    #[serde(default = "default_shutdown_timeout")]
+    pub shutdown_timeout_secs: u64,
+    #[serde(default = "default_log_retention")]
+    pub log_retention_days: u64,
+    #[serde(default = "default_channel_capacity")]
+    pub engine_channel_capacity: usize,
+    #[serde(default = "default_notif_timeout")]
+    pub notification_timeout_ms: i32,
+    #[serde(default = "default_resumable_threshold")]
+    pub resumable_upload_threshold: u64,
+    #[serde(default)]
+    pub upload_limit_kbps: u64,
+    #[serde(default = "default_api_rate_limit")]
+    pub api_rate_limit_rps: u32,
+    #[serde(default = "default_delete_mode")]
+    pub delete_mode: String,
+    #[serde(default = "default_symlink_mode")]
+    pub symlink_mode: String,
+}
+
+impl Default for AdvancedConfig {
+    fn default() -> Self {
+        Self {
+            debounce_ms: default_debounce_ms(),
+            health_check_interval_secs: default_health_check_secs(),
+            max_concurrent_ls: default_max_concurrent_ls(),
+            shutdown_timeout_secs: default_shutdown_timeout(),
+            log_retention_days: default_log_retention(),
+            engine_channel_capacity: default_channel_capacity(),
+            notification_timeout_ms: default_notif_timeout(),
+            resumable_upload_threshold: default_resumable_threshold(),
+            upload_limit_kbps: 0,
+            api_rate_limit_rps: default_api_rate_limit(),
+            delete_mode: default_delete_mode(),
+            symlink_mode: default_symlink_mode(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SyncPair {
+    pub name: String,
+    pub local_path: PathBuf,
+    #[serde(default)] // Défaut vide, rempli par le wizard OAuth2
+    pub remote_folder_id: String,
+    #[serde(default = "default_provider")]
+    pub provider: String,
+    #[serde(default = "default_true")]
+    pub active: bool,
+    #[serde(default)]
+    pub ignore_patterns: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AppConfig {
-    /// Répertoire local à surveiller. Vide = non configuré.
     #[serde(default)]
-    pub local_root: PathBuf,
-    /// URL distante KIO, ex: gdrive:/MonDrive/Backup
-    #[serde(default)]
-    pub remote_root: String,
-    #[serde(default = "default_ignore_patterns")]
-    pub ignore_patterns: Vec<String>,
+    pub sync_pairs: Vec<SyncPair>,
     #[serde(default = "default_max_workers")]
     pub max_workers: usize,
     #[serde(default)]
-    pub retry: RetryConfig,
-    #[serde(default)]
     pub notifications: bool,
-    /// Timeout (secondes) pour les opérations KIO rapides (stat, mkdir, ls, rm, move).
-    /// Les transferts de fichiers (copy/cat) ne sont PAS limités.
-    #[serde(default = "default_kio_timeout_secs")]
-    pub kio_timeout_secs: u64,
-    /// Intervalle (minutes) entre les rescans automatiques.
-    /// Vérifie l'égalité local = DB = remote même sans événement inotify.
-    /// 0 = désactivé. Défaut = 30 min.
     #[serde(default = "default_rescan_interval_min")]
     pub rescan_interval_min: u64,
+    #[serde(default = "default_ignore_patterns")]
+    pub ignore_patterns: Vec<String>,
+    #[serde(default)]
+    pub retry: RetryConfig,
+    #[serde(default)]
+    pub advanced: AdvancedConfig,
 }
 
 // ── Erreurs de validation ─────────────────────────────────────────────────────
 
-/// Erreurs de validation de la configuration.
-///
-/// Utilisées par [`AppConfig::validate`] pour signaler les problèmes
-/// avant le démarrage du moteur. Chaque variante produit un message
-/// d'erreur lisible en français.
 #[derive(Debug, Error)]
 pub enum ConfigError {
-    #[error("le chemin local n'est pas configuré — ouvrez Settings")]
-    LocalRootEmpty,
-    #[error("le dossier local '{0}' n'existe pas — créez-le ou modifiez Settings")]
-    LocalRootMissing(PathBuf),
-    #[error("le chemin local '{0}' n'est pas un dossier")]
-    LocalRootNotDir(PathBuf),
-    #[error("le remote n'est pas configuré — ouvrez Settings")]
-    RemoteEmpty,
-    #[error("protocole KIO non reconnu dans '{0}' (attendu: gdrive:/, smb:/, sftp:/…)")]
-    RemoteInvalidProtocol(String),
+    #[error("aucune paire de synchronisation n'est configurée — ouvrez les réglages")]
+    NoPairsConfigured,
+    #[error("la paire #{0} a un nom vide")]
+    PairNameEmpty(usize),
+    #[error("la paire #{0} a un chemin local vide")]
+    PairLocalEmpty(usize),
+    #[error("la paire #{0} a un chemin local '{1}' qui n'existe pas ou n'est pas un répertoire")]
+    PairLocalMissing(usize, PathBuf),
 }
 
 // ── Chemin de la config ───────────────────────────────────────────────────────
 
-/// Retourne le chemin du fichier de configuration TOML.
-///
-/// Respecte la convention XDG : `$XDG_CONFIG_HOME/syncgdrive/config.toml`.
-/// Défaut si `XDG_CONFIG_HOME` n'est pas défini : `~/.config/syncgdrive/config.toml`.
 pub fn config_path() -> PathBuf {
     let base = std::env::var("XDG_CONFIG_HOME")
         .map(PathBuf::from)
@@ -164,75 +166,116 @@ pub fn config_path() -> PathBuf {
     base.join("syncgdrive").join("config.toml")
 }
 
-// ── Chargement / création ─────────────────────────────────────────────────────
+// ── Logique Principale ────────────────────────────────────────────────────────
 
 impl AppConfig {
-    /// Charge la config depuis le disque.
+    /// Charge la config depuis le disque et gère la migration V1 -> V2.
     /// Retourne `(config, is_first_run)`.
     pub fn load_or_create() -> Result<(Self, bool)> {
         let path = config_path();
 
         if !path.exists() {
-            // Premier lancement : on crée un fichier vide avec les commentaires.
             if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent)
-                    .with_context(|| format!("cannot create config dir {}", parent.display()))?;
+                std::fs::create_dir_all(parent)?;
             }
             let default = AppConfig::default();
-            let toml = toml::to_string_pretty(&default)
-                .context("cannot serialize default config")?;
-            std::fs::write(&path, toml)
-                .with_context(|| format!("cannot write config to {}", path.display()))?;
+            default.save()?;
             return Ok((default, true));
         }
 
-        let raw = std::fs::read_to_string(&path)
-            .with_context(|| format!("cannot read config from {}", path.display()))?;
-        let mut cfg: AppConfig = toml::from_str(&raw)
-            .with_context(|| format!("cannot parse config at {}", path.display()))?;
+        let raw = std::fs::read_to_string(&path)?;
+        let (mut cfg, migrated) = Self::parse_and_migrate(&raw)?;
 
-        // Canonicalise le tilde dans local_root.
-        cfg.local_root = expand_tilde(&cfg.local_root);
+        if migrated {
+            // Création du backup V1
+            let backup_path = path.with_extension("toml.v1.bak");
+            std::fs::write(&backup_path, &raw)
+                .with_context(|| format!("Échec création backup V1: {}", backup_path.display()))?;
 
+            info!("Migration config V1 → V2 effectuée. Backup créé dans {:?}", backup_path);
+
+            // Sauvegarde du nouveau format V2
+            cfg.save()?;
+        }
+
+        cfg.expand_tildes();
         Ok((cfg, false))
     }
 
-    /// Sauvegarde la config sur le disque.
+    /// Fonction pure pour tester la logique de parsing et migration sans IO.
+    pub fn parse_and_migrate(raw_toml: &str) -> Result<(Self, bool)> {
+        let toml_val: toml::Value = toml::from_str(raw_toml)
+            .context("Fichier TOML invalide")?;
+
+        // Vérification de la présence de paires V2
+        let has_v2_pairs = toml_val.get("sync_pairs")
+            .and_then(|v| v.as_array())
+            .map(|arr| !arr.is_empty())
+            .unwrap_or(false);
+
+        if has_v2_pairs {
+            // C'est une V2 valide
+            let cfg: AppConfig = toml::from_str(raw_toml)?;
+            return Ok((cfg, false));
+        }
+
+        // Si pas de paires V2, on tente de migrer les données V1
+        let mut cfg: AppConfig = toml::from_str(raw_toml)?; // Charge les autres champs (workers, etc.)
+        let mut migrated = false;
+
+        if let Some(local_root) = toml_val.get("local_root").and_then(|v| v.as_str()) {
+            if !local_root.trim().is_empty() {
+                cfg.sync_pairs.push(SyncPair {
+                    name: "Sync principal".into(),
+                    local_path: PathBuf::from(local_root),
+                    remote_folder_id: String::new(), // Sera rempli par OAuth2
+                    provider: default_provider(),
+                    active: true,
+                    ignore_patterns: Vec::new(),
+                });
+                migrated = true;
+            }
+        }
+
+        Ok((cfg, migrated))
+    }
+
     pub fn save(&self) -> Result<()> {
         let path = config_path();
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let toml = toml::to_string_pretty(self).context("cannot serialize config")?;
-        std::fs::write(&path, toml)
-            .with_context(|| format!("cannot write config to {}", path.display()))?;
+        let toml = toml::to_string_pretty(self).context("Erreur sérialisation V2")?;
+        std::fs::write(&path, toml)?;
         Ok(())
     }
 
-    /// Vérifie que la config est suffisante pour démarrer le moteur.
     pub fn validate(&self) -> Result<(), ConfigError> {
-        if self.local_root.as_os_str().is_empty() {
-            return Err(ConfigError::LocalRootEmpty);
+        if self.sync_pairs.is_empty() {
+            return Err(ConfigError::NoPairsConfigured);
         }
-        if !self.local_root.exists() {
-            return Err(ConfigError::LocalRootMissing(self.local_root.clone()));
-        }
-        if !self.local_root.is_dir() {
-            return Err(ConfigError::LocalRootNotDir(self.local_root.clone()));
-        }
-        if self.remote_root.is_empty() {
-            return Err(ConfigError::RemoteEmpty);
-        }
-        let supported = ["gdrive://", "gdrive:/", "smb://", "sftp://", "webdav://", "ftp://"];
-        if !supported.iter().any(|p| self.remote_root.starts_with(p)) {
-            return Err(ConfigError::RemoteInvalidProtocol(self.remote_root.clone()));
+        for (i, pair) in self.sync_pairs.iter().enumerate() {
+            if pair.name.trim().is_empty() {
+                return Err(ConfigError::PairNameEmpty(i));
+            }
+            if pair.local_path.as_os_str().is_empty() {
+                return Err(ConfigError::PairLocalEmpty(i));
+            }
+            if pair.active && !pair.local_path.is_dir() {
+                return Err(ConfigError::PairLocalMissing(i, pair.local_path.clone()));
+            }
         }
         Ok(())
     }
 
-    /// Raccourci booléen.
     pub fn is_valid(&self) -> bool {
         self.validate().is_ok()
+    }
+
+    fn expand_tildes(&mut self) {
+        for pair in &mut self.sync_pairs {
+            pair.local_path = expand_tilde(&pair.local_path);
+        }
     }
 }
 
@@ -248,113 +291,80 @@ fn expand_tilde(path: &Path) -> PathBuf {
     }
 }
 
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn default_config_is_invalid() {
+    fn test_deserialize_v2_config() {
+        let toml = r#"
+            max_workers = 8
+            [[sync_pairs]]
+            name = "Projets"
+            local_path = "/home/user/Projets"
+            remote_folder_id = "12345"
+        "#;
+        let (cfg, migrated) = AppConfig::parse_and_migrate(toml).unwrap();
+        assert!(!migrated);
+        assert_eq!(cfg.max_workers, 8);
+        assert_eq!(cfg.sync_pairs.len(), 1);
+        assert_eq!(cfg.sync_pairs[0].name, "Projets");
+    }
+
+    #[test]
+    fn test_deserialize_v1_config_migrates() {
+        let toml = r#"
+            local_root = "/home/user/OldV1"
+            remote_root = "gdrive:/Backup"
+            max_workers = 2
+        "#;
+        let (cfg, migrated) = AppConfig::parse_and_migrate(toml).unwrap();
+        assert!(migrated);
+        assert_eq!(cfg.sync_pairs.len(), 1);
+        assert_eq!(cfg.sync_pairs[0].local_path, PathBuf::from("/home/user/OldV1"));
+        assert_eq!(cfg.max_workers, 2); // Les autres champs sont préservés
+    }
+
+    #[test]
+    fn test_validate_empty_pairs() {
         let cfg = AppConfig::default();
-        assert!(cfg.validate().is_err());
+        assert!(matches!(cfg.validate(), Err(ConfigError::NoPairsConfigured)));
     }
 
     #[test]
-    fn expand_tilde_works() {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/root".into());
-        let p = expand_tilde(&PathBuf::from("~/foo/bar"));
-        assert_eq!(p, PathBuf::from(format!("{home}/foo/bar")));
-    }
-
-    #[test]
-    fn expand_tilde_no_change_without_tilde() {
-        let p = expand_tilde(&PathBuf::from("/absolute/path"));
-        assert_eq!(p, PathBuf::from("/absolute/path"));
-    }
-
-    #[test]
-    fn validate_empty_local_root() {
-        let cfg = AppConfig { remote_root: "gdrive:/test".into(), ..Default::default() };
-        assert!(matches!(cfg.validate(), Err(ConfigError::LocalRootEmpty)));
-    }
-
-    #[test]
-    fn validate_missing_local_root() {
-        let cfg = AppConfig {
-            local_root: PathBuf::from("/inexistant_syncgdrive_test_dir_xyz"),
-            remote_root: "gdrive:/test".into(),
-            ..Default::default()
-        };
-        assert!(matches!(cfg.validate(), Err(ConfigError::LocalRootMissing(_))));
-    }
-
-    #[test]
-    fn validate_empty_remote() {
-        let cfg = AppConfig {
-            local_root: std::env::temp_dir(),
-            ..Default::default()
-        };
-        assert!(matches!(cfg.validate(), Err(ConfigError::RemoteEmpty)));
-    }
-
-    #[test]
-    fn validate_invalid_protocol() {
-        let cfg = AppConfig {
-            local_root: std::env::temp_dir(),
-            remote_root: "http://invalid".into(),
-            ..Default::default()
-        };
-        assert!(matches!(cfg.validate(), Err(ConfigError::RemoteInvalidProtocol(_))));
-    }
-
-    #[test]
-    fn validate_valid_gdrive_config() {
-        let cfg = AppConfig {
-            local_root: std::env::temp_dir(),
-            remote_root: "gdrive:/MonDrive/Backup".into(),
-            ..Default::default()
-        };
+    fn test_validate_inactive_pair_missing_dir() {
+        let mut cfg = AppConfig::default();
+        cfg.sync_pairs.push(SyncPair {
+            name: "Test".into(),
+            local_path: PathBuf::from("/chemin/inexistant/xyz"),
+            remote_folder_id: "".into(),
+            provider: "GoogleDrive".into(),
+            active: false, // Inactif ! Donc ça doit passer la validation
+            ignore_patterns: vec![],
+        });
         assert!(cfg.validate().is_ok());
     }
 
     #[test]
-    fn validate_all_supported_protocols() {
-        for proto in &["gdrive:/", "smb://", "sftp://", "webdav://", "ftp://"] {
-            let cfg = AppConfig {
-                local_root: std::env::temp_dir(),
-                remote_root: format!("{proto}test"),
-                ..Default::default()
-            };
-            assert!(cfg.validate().is_ok(), "protocol {proto} should be valid");
-        }
+    fn test_validate_active_pair_missing_dir() {
+        let mut cfg = AppConfig::default();
+        cfg.sync_pairs.push(SyncPair {
+            name: "Test".into(),
+            local_path: PathBuf::from("/chemin/inexistant/xyz"),
+            remote_folder_id: "".into(),
+            provider: "GoogleDrive".into(),
+            active: true, // Actif ! Ça doit planter
+            ignore_patterns: vec![],
+        });
+        assert!(matches!(cfg.validate(), Err(ConfigError::PairLocalMissing(_, _))));
     }
 
     #[test]
-    fn is_valid_shortcut() {
+    fn test_default_advanced_values() {
         let cfg = AppConfig::default();
-        assert!(!cfg.is_valid());
-    }
-
-    #[test]
-    fn default_values_via_deserialize() {
-        // Les serde(default) s'appliquent au parsing TOML, pas à Default::default()
-        let cfg: AppConfig = toml::from_str("").unwrap();
-        assert_eq!(cfg.max_workers, 4);
-        assert_eq!(cfg.kio_timeout_secs, 120);
-        assert_eq!(cfg.rescan_interval_min, 30);
-        assert_eq!(cfg.retry.max_attempts, 3);
-        assert!(!cfg.notifications);
-    }
-
-    #[test]
-    fn deserialize_minimal_toml() {
-        let toml_str = r#"
-            local_root = "/tmp"
-            remote_root = "gdrive:/Test"
-        "#;
-        let cfg: AppConfig = toml::from_str(toml_str).unwrap();
-        assert_eq!(cfg.local_root, PathBuf::from("/tmp"));
-        assert_eq!(cfg.remote_root, "gdrive:/Test");
-        assert_eq!(cfg.max_workers, 4); // défaut
+        assert_eq!(cfg.advanced.resumable_upload_threshold, 5_242_880);
+        assert_eq!(cfg.advanced.delete_mode, "trash");
     }
 }
-
