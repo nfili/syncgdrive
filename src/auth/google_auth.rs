@@ -65,4 +65,35 @@ impl GoogleAuth {
         self.save_tokens(&new_tokens)?;
         Ok(new_tokens.access_token)
     }
+    /// Révoque l'accès côté serveur (Google) et supprime le fichier local chiffré.
+    pub async fn revoke_token(&self) -> Result<()> {
+        // 1. Tenter de lire le token actuel pour le révoquer côté serveur
+        if let Ok(Some(tokens)) = self.storage.load() {
+            tracing::info!("Envoi de la requête de révocation à Google...");
+            let client = reqwest::Client::new();
+
+            // Envoyer le refresh_token révoque toute la chaîne (y compris l'access_token)
+            let res = client.post("https://oauth2.googleapis.com/revoke")
+                .header("Content-Type", "application/x-www-form-urlencoded")
+                .body(format!("token={}", tokens.refresh_token))
+                .send()
+                .await;
+
+            if let Err(e) = res {
+                // On log l'erreur mais on ne bloque pas la suppression locale (utile si on est hors-ligne)
+                tracing::warn!("Impossible de joindre Google pour la révocation : {}", e);
+            }
+        }
+
+        // 2. Suppression systématique du fichier local tokens.enc
+        tracing::info!("Suppression du fichier chiffré local...");
+        self.storage.clear().context("Erreur lors de la suppression du fichier de tokens")?;
+
+        Ok(())
+    }
+
+    /// Méthode utilitaire simple pour vérifier si on a un token local (sans faire d'appel réseau)
+    pub fn is_locally_connected(&self) -> bool {
+        self.storage.load().map(|opt| opt.is_some()).unwrap_or(false)
+    }
 }

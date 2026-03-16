@@ -153,78 +153,137 @@ where
         .valign(gtk4::Align::Center)
         .build();
     remote_row.add_suffix(&remote_status);
+    // --- Getsion de AuthManager -------------------------------
+    let auth_manager = crate::auth::GoogleAuth::new();
+    let is_connected = auth_manager.is_locally_connected();
 
     // --- NOUVEAU : Bouton d'authentification OAuth2 ---
-    let btn_auth = gtk4::Button::builder()
-        .label("Lier un compte Google Drive")
-        .css_classes(["suggested-action", "pill"])
-        .valign(gtk4::Align::Center)
+    let btn_google = gtk4::Button::builder()
+        .margin_top(12)
+        .margin_bottom(12)
+        .margin_start(24)
+        .margin_end(0)
         .build();
+
+    // Style dynamique selon l'état
+    if is_connected {
+        btn_google.set_label("Révoquer");
+        btn_google.add_css_class("destructive-action"); // Bouton rouge Libadwaita
+    } else {
+        btn_google.set_label("Lier");
+        btn_google.add_css_class("suggested-action"); // Bouton bleu
+    }
 
     let auth_row = libadwaita::ActionRow::builder()
         .title("Authentification")
-        .subtitle("Autorisez l'application à accéder à votre Drive")
         .build();
-    auth_row.add_suffix(&btn_auth);
+    auth_row.add_suffix(&btn_google);
+
+    if is_connected {
+        auth_row.set_subtitle("Révoquer le compte Google Drive lié.");
+    } else {
+        auth_row.set_subtitle("Lier un compte Google Drive.");
+    }
 
     grp_paths.add(&auth_row);
 
     // On clone l'overlay pour pouvoir afficher des Toasts (notifications in-app)
     let overlay_clone = toast_overlay.clone();
 
-    btn_auth.connect_clicked(move |btn| {
-        // 1. On désactive le bouton pour éviter le double-clic
-        btn.set_sensitive(false);
-        btn.set_label("En attente du navigateur...");
+    let auth_row_closure = auth_row.clone();
 
-        let btn_clone = btn.clone();
-        let overlay_ui = overlay_clone.clone();
+    btn_google.connect_clicked(move |clicked_btn| {
+        let auth = crate::auth::GoogleAuth::new();
 
-        // 2. Lancer la tâche asynchrone sur la boucle principale GTK
-        gtk4::glib::MainContext::default().spawn_local(async move {
-            let (tx, rx) = tokio::sync::oneshot::channel();
+        if auth.is_locally_connected() {
+            // --- ACTION : RÉVOQUER ---
+            let btn_async = clicked_btn.clone();
+            let auth_row_async = auth_row_closure.clone();
 
-            // 3. On lance le flux OAuth2 dans un thread totalement isolé
-            std::thread::spawn(move || {
-                let rt = tokio::runtime::Runtime::new().expect("Impossible de créer le runtime Tokio temporaire");
-                let res = rt.block_on(async {
-                    let creds = crate::auth::OAuthAppCredentials::default();
-                    crate::auth::oauth2::authenticate(&creds).await
+            gtk4::glib::MainContext::default().spawn_local(async move {
+                let (tx, rx) = tokio::sync::oneshot::channel();
+
+                // On isole l'appel réseau dans un thread dédié avec son propre runtime Tokio
+                std::thread::spawn(move || {
+                    let rt = tokio::runtime::Runtime::new().expect("Erreur runtime Tokio");
+                    let res = rt.block_on(async {
+                        // On instancie l'auth ici pour le thread
+                        let local_auth = crate::auth::GoogleAuth::new();
+                        local_auth.revoke_token().await
+                    });
+                    let _ = tx.send(res);
                 });
-                let _ = tx.send(res);
+
+                // On attend la réponse sur le thread GTK sans le bloquer
+                if let Ok(res) = rx.await {
+                    match res {
+                        Ok(_) => {
+                            auth_row_async.set_subtitle("Lier un compte Google Drive.");
+                            btn_async.set_label("Lier");
+                            btn_async.remove_css_class("destructive-action");
+                            btn_async.add_css_class("suggested-action");
+                            tracing::info!("✅ Compte déconnecté avec succès.");
+                        }
+                        Err(e) => tracing::error!("Erreur lors de la déconnexion : {}", e),
+                    }
+                }
             });
+        } else {
+            // --- ACTION : CONNECTER ---
+            clicked_btn.set_sensitive(false);
+            clicked_btn.set_label("En attente du navigateur...");
 
-            // 4. On attend la réponse sans bloquer l'interface GTK
-            let res = rx.await.unwrap_or_else(|_| Err(anyhow::anyhow!("Le thread d'authentification a planté")));
+            let btn_async = clicked_btn.clone();
+            let auth_row_async = auth_row_closure.clone();
+            let overlay_ui = overlay_clone.clone();
 
-            // Restauration du bouton
-            btn_clone.set_sensitive(true);
-            btn_clone.set_label("Lier un compte Google Drive");
+            gtk4::glib::MainContext::default().spawn_local(async move {
+                let (tx, rx) = tokio::sync::oneshot::channel();
 
-            match res {
-                Ok(tokens) => {
-                    // Instanciation de SystemKeyring
-                    let auth = crate::auth::google_auth::GoogleAuth::new();
-                    if let Err(e) = auth.save_tokens(&tokens) {
-                        tracing::error!("Erreur de stockage keyring: {}", e);
-                    } else {
+                std::thread::spawn(move || {
+                    let rt = tokio::runtime::Runtime::new().expect("Erreur runtime Tokio temporaire");
+                    let res = rt.block_on(async {
+                        let creds = crate::auth::OAuthAppCredentials::default();
+                        crate::auth::oauth2::authenticate(&creds).await
+                    });
+                    let _ = tx.send(res);
+                });
+
+                let res = rx.await.unwrap_or_else(|_| Err(anyhow::anyhow!("Le thread d'authentification a planté")));
+                btn_async.set_sensitive(true);
+
+                match res {
+                    Ok(tokens) => {
+                        let local_auth = crate::auth::GoogleAuth::new();
+                        if let Err(e) = local_auth.save_tokens(&tokens) {
+                            tracing::error!("Erreur de stockage : {}", e);
+                        } else {
+                            let toast = libadwaita::Toast::builder()
+                                .title("✅ Compte Google lié avec succès !")
+                                .timeout(5)
+                                .build();
+
+                            auth_row_async.set_subtitle("Révoquer le compte Google Drive lié.");
+                            btn_async.set_label("Révoquer");
+                            btn_async.remove_css_class("suggested-action");
+                            btn_async.add_css_class("destructive-action");
+                            overlay_ui.add_toast(toast);
+                        }
+                    }
+                    Err(e) => {
+                        auth_row_async.set_subtitle("Lier un compte Google Drive.");
+                        btn_async.set_label("Lier");
+
+                        tracing::error!("Échec OAuth2: {}", e);
                         let toast = libadwaita::Toast::builder()
-                            .title("✅ Compte Google lié avec succès !")
-                            .timeout(5)
+                            .title(&format!("❌ Erreur : {}", e))
+                            .timeout(7)
                             .build();
                         overlay_ui.add_toast(toast);
                     }
                 }
-                Err(e) => {
-                    tracing::error!("Échec OAuth2: {}", e);
-                    let toast = libadwaita::Toast::builder()
-                        .title(&format!("❌ Erreur : {}", e))
-                        .timeout(7)
-                        .build();
-                    overlay_ui.add_toast(toast);
-                }
-            }
-        });
+            });
+        }
     });
     // --- FIN DU BLOC OAUTH2 ---
 
