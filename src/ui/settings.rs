@@ -165,24 +165,41 @@ where
         .margin_end(0)
         .build();
 
-    // Style dynamique selon l'état
-    if is_connected {
-        btn_google.set_label("Révoquer");
-        btn_google.add_css_class("destructive-action"); // Bouton rouge Libadwaita
-    } else {
-        btn_google.set_label("Lier");
-        btn_google.add_css_class("suggested-action"); // Bouton bleu
-    }
-
     let auth_row = libadwaita::ActionRow::builder()
         .title("Authentification")
         .build();
     auth_row.add_suffix(&btn_google);
 
     if is_connected {
-        auth_row.set_subtitle("Révoquer le compte Google Drive lié.");
+        btn_google.set_label("Révoquer l'accès");
+        btn_google.add_css_class("destructive-action");
+        auth_row.set_subtitle("Chargement des informations du compte...");
+
+        let auth_row_init = auth_row.clone();
+
+        // Tâche en arrière-plan pour ne pas bloquer l'affichage de la fenêtre
+        gtk4::glib::MainContext::default().spawn_local(async move {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                let res = rt.block_on(async {
+                    let local_auth = crate::auth::GoogleAuth::new();
+                    let email = local_auth.get_user_email().await.unwrap_or_else(|_| "Inconnu".into());
+                    let expiry = local_auth.get_token_expiration_date();
+                    (email, expiry)
+                });
+                let _ = tx.send(res);
+            });
+
+            if let Ok((email, expiry)) = rx.await {
+                auth_row_init.set_subtitle(&format!("✅ Compte lié : {}\nToken valide jusqu'au {}", email, expiry));
+            }
+        });
     } else {
-        auth_row.set_subtitle("Lier un compte Google Drive.");
+        btn_google.set_label("Lier");
+        btn_google.add_css_class("suggested-action");
+        auth_row.set_subtitle("Lié un compte Google Drive");
     }
 
     grp_paths.add(&auth_row);
@@ -258,16 +275,36 @@ where
                         if let Err(e) = local_auth.save_tokens(&tokens) {
                             tracing::error!("Erreur de stockage : {}", e);
                         } else {
-                            let toast = libadwaita::Toast::builder()
-                                .title("✅ Compte Google lié avec succès !")
-                                .timeout(5)
-                                .build();
+                            let auth_row_success = auth_row_async.clone();
+                            let btn_success = btn_async.clone();
+                            let overlay_success = overlay_ui.clone();
 
-                            auth_row_async.set_subtitle("Révoquer le compte Google Drive lié.");
-                            btn_async.set_label("Révoquer");
-                            btn_async.remove_css_class("suggested-action");
-                            btn_async.add_css_class("destructive-action");
-                            overlay_ui.add_toast(toast);
+                            gtk4::glib::MainContext::default().spawn_local(async move {
+                                let (tx_info, rx_info) = tokio::sync::oneshot::channel();
+                                std::thread::spawn(move || {
+                                    let rt = tokio::runtime::Runtime::new().unwrap();
+                                    let info = rt.block_on(async {
+                                        let auth_info = crate::auth::GoogleAuth::new();
+                                        let email = auth_info.get_user_email().await.unwrap_or_else(|_| "Inconnu".into());
+                                        let expiry = auth_info.get_token_expiration_date();
+                                        (email, expiry)
+                                    });
+                                    let _ = tx_info.send(info);
+                                });
+
+                                if let Ok((email, expiry)) = rx_info.await {
+                                    auth_row_success.set_subtitle(&format!("✅ Compte lié : {}\nToken valide jusqu'au {}", email, expiry));
+                                    btn_success.set_label("Révoquer");
+                                    btn_success.remove_css_class("suggested-action");
+                                    btn_success.add_css_class("destructive-action");
+
+                                    let toast = libadwaita::Toast::builder()
+                                        .title("✅ Compte Google lié avec succès !")
+                                        .timeout(5)
+                                        .build();
+                                    overlay_success.add_toast(toast);
+                                }
+                            });
                         }
                     }
                     Err(e) => {

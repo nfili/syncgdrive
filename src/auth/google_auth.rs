@@ -4,6 +4,18 @@ use crate::auth::storage::{EncryptedFileStorage, TokenStorage};
 use oauth2::basic::BasicClient;
 use oauth2::reqwest::async_http_client;
 use oauth2::{AuthUrl, ClientId, ClientSecret, TokenResponse, TokenUrl, RefreshToken};
+use serde::Deserialize;
+
+#[derive(Deserialize)]
+struct DriveAbout {
+    user: DriveUser,
+}
+
+#[derive(Deserialize)]
+struct DriveUser {
+    #[serde(rename = "emailAddress")]
+    email_address: String,
+}
 
 pub struct GoogleAuth {
     storage: EncryptedFileStorage,
@@ -95,5 +107,34 @@ impl GoogleAuth {
     /// Méthode utilitaire simple pour vérifier si on a un token local (sans faire d'appel réseau)
     pub fn is_locally_connected(&self) -> bool {
         self.storage.load().map(|opt| opt.is_some()).unwrap_or(false)
+    }
+
+    /// Interroge l'API Google Drive pour récupérer l'adresse email de l'utilisateur
+    pub async fn get_user_email(&self) -> Result<String> {
+        let token = self.get_valid_token().await?;
+        let client = reqwest::Client::new();
+
+        let res = client.get("https://www.googleapis.com/drive/v3/about?fields=user")
+            .bearer_auth(token)
+            .send()
+            .await?
+            .error_for_status()?; // Déclenche une erreur si le statut HTTP n'est pas 2xx
+
+        let about: DriveAbout = res.json().await
+            .context("Erreur lors de la lecture du profil utilisateur")?;
+
+        Ok(about.user.email_address)
+    }
+
+    /// Lit la date d'expiration du jeton depuis le fichier chiffré
+    pub fn get_token_expiration_date(&self) -> String {
+        if let Ok(Some(tokens)) = self.storage.load() {
+            // Convertit le timestamp en DateTime
+            if let Some(dt) = chrono::DateTime::from_timestamp(tokens.expires_at, 0) {
+                // Formate la date selon ta spécification : YYYY-MM-DD
+                return dt.format("%Y-%m-%d %H:%M").to_string();
+            }
+        }
+        "Inconnue".to_string()
     }
 }

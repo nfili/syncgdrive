@@ -54,6 +54,11 @@ impl TokenStorage for EncryptedFileStorage {
         let mut file_content = nonce.to_vec();
         file_content.extend_from_slice(&ciphertext);
 
+        if let Some(parent) = self.path.parent() {
+            std::fs::create_dir_all(parent)
+                .context("Impossible de créer le dossier parent pour les tokens")?;
+        }
+
         std::fs::write(&self.path, &file_content)
             .context("Impossible d'écrire le fichier chiffré")?;
 
@@ -105,5 +110,85 @@ impl TokenStorage for EncryptedFileStorage {
             std::fs::remove_file(&self.path)?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::auth::oauth2::GoogleTokens;
+    use std::env;
+    use std::fs;
+
+    // Helper pour isoler les tests dans un dossier temporaire
+    // Helper pour isoler les tests dans un dossier temporaire
+    fn setup_test_env(test_name: &str) -> String {
+        let temp_dir = env::temp_dir().join(format!("syncgdrive_test_{}", test_name));
+
+        // On crée explicitement le sous-dossier attendu par l'application
+        let app_config_dir = temp_dir.join("syncgdrive");
+        fs::create_dir_all(&app_config_dir).unwrap();
+
+        // Simule le ~/.config
+        env::set_var("XDG_CONFIG_HOME", temp_dir.to_str().unwrap());
+        // Clé de chiffrement factice pour le test AES-256-GCM
+        env::set_var("SYNCGDRIVE_CLIENT_SECRET", "super_secret_de_test_12345");
+
+        temp_dir.to_str().unwrap().to_string()
+    }
+
+    fn dummy_tokens() -> GoogleTokens {
+        GoogleTokens {
+            access_token: "access_123".into(),
+            refresh_token: "refresh_456".into(),
+            expires_at: 1700000000,
+            scope: "drive.file".into(),
+        }
+    }
+
+    #[test]
+    fn test_file_storage_roundtrip() {
+        setup_test_env("roundtrip");
+        let storage = EncryptedFileStorage::new().expect("Init storage");
+        let tokens = dummy_tokens();
+
+        // Store
+        storage.store(&tokens).expect("Store failed");
+
+        // Load
+        let loaded = storage.load().expect("Load failed").expect("Tokens should exist");
+
+        // Identiques
+        assert_eq!(loaded.access_token, tokens.access_token);
+        assert_eq!(loaded.refresh_token, tokens.refresh_token);
+    }
+
+    #[test]
+    fn test_file_storage_clear() {
+        setup_test_env("clear");
+        let storage = EncryptedFileStorage::new().unwrap();
+
+        storage.store(&dummy_tokens()).unwrap();
+        storage.clear().expect("Clear failed");
+
+        let loaded = storage.load().unwrap();
+        assert!(loaded.is_none(), "Les tokens devraient être supprimés");
+    }
+
+    #[test]
+    fn test_file_storage_corruption() {
+        let dir = setup_test_env("corruption");
+        let storage = EncryptedFileStorage::new().unwrap();
+
+        // On écrit volontairement un fichier poubelle de 15 octets (pour passer la vérification de taille du Nonce mais faire planter le déchiffrement AES)
+        let bad_data = vec![0u8; 15];
+        fs::write(format!("{}/syncgdrive/tokens.enc", dir), bad_data).unwrap();
+
+        let result = storage.load();
+
+        // Doit retourner une erreur propre (Err), pas un panic!
+        assert!(result.is_err(), "La corruption doit être gérée et retourner une erreur");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("Échec du déchiffrement") || err_msg.contains("Fichier de tokens corrompu"));
     }
 }

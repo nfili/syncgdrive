@@ -22,6 +22,7 @@ L'ordinateur local est la **source de vérité** — le Drive est la sauvegarde.
 - 🔒 **Instance unique** — verrou `flock` + PID file dans `$XDG_RUNTIME_DIR`
 - 🚀 **Service systemd** — toggle "Lancer au démarrage" via `systemctl --user`
 - 📊 **Logs rotatifs** — rotation quotidienne, rétention 7 jours, non-bloquant
+- 🔐 **Sécurité OAuth2** — flux loopback PKCE, auto-refresh des tokens, chiffrement AES-256-GCM au repos
 
 ## Prérequis
 
@@ -79,6 +80,64 @@ systemctl --user start syncgdrive.service    # démarrage immédiat
 
 Le toggle "Lancer au démarrage" du menu systray exécute `systemctl --user enable/disable` automatiquement.
 
+### Configuration de l'API Google Drive (Gratuit)
+Pour que SyncGDrive puisse communiquer avec votre compte Google Drive de manière autonome, vous devez créer vos propres identifiants OAuth2. Cette opération est 100% gratuite et ne nécessite aucune validation complexe de la part de Google grâce à l'utilisation du scope restreint drive.file (l'application ne voit que les fichiers qu'elle a elle-même créés).
+
+1. Étape 1 : Créer le projet Google Cloud
+    * Rendez-vous sur la Google Cloud Console.
+    * Connectez-vous avec votre compte Google.
+    * Cliquez sur la liste déroulante des projets en haut à gauche et sélectionnez Nouveau projet.
+    * Nommez-le SyncGDrive (ou le nom de votre choix) et cliquez sur Créer.
+
+
+2. Étape 2 : Activer l'API Google Drive
+   * Dans le menu de gauche, allez dans API et services > Bibliothèque.
+   * Cherchez "Google Drive API" et cliquez dessus.
+   * Cliquez sur le bouton bleu Activer.
+
+
+3. Étape 3 : Configurer l'écran de consentement OAuth
+   * Allez dans API et services > Écran de consentement OAuth.
+   * Choisissez le type d'utilisateur Externe (sauf si vous avez un compte Google Workspace payant) et cliquez sur Créer.
+   * Remplissez les informations obligatoires :
+   * Nom de l'application : SyncGDrive
+   * Adresses e-mail d'assistance et du développeur (votre email).
+   * Cliquez sur Enregistrer et continuer.
+   * Sur l'écran Champs d'application (Scopes), cliquez sur Ajouter ou supprimer des champs d'application.
+   * Cherchez et cochez manuellement le scope : https://www.googleapis.com/auth/drive.file.
+   * Continuez jusqu'à la section Utilisateurs tests. Ajoutez l'adresse email de votre compte Google (celui que vous allez synchroniser) pour pouvoir utiliser l'application pendant la phase de test.
+
+
+4. Étape 4 : Créer les identifiants
+   * Allez dans API et services > Identifiants.
+   * Cliquez sur + Créer des identifiants en haut, puis choisissez ID client OAuth.
+   * Type d'application : Sélectionnez Application de bureau (Desktop app).
+   * Nom : SyncGDrive Desktop.
+   * Cliquez sur Créer.
+
+
+5. Étape 5 : Configurer l'application locale
+   * Une fenêtre s'affiche avec votre ID client et votre Code secret du client.
+     1. Sur votre machine Arch Linux, créez le dossier de configuration s'il n'existe pas :
+     ``` Bash
+     mkdir -p ~/.config/syncgdrive
+     ```
+     2. Créez un fichier .env à l'intérieur :
+     ``` Bash
+     nano ~/.config/syncgdrive/.env
+     ```
+     3. Collez vos identifiants dans ce fichier selon le format suivant :
+     ```
+     SYNCGDRIVE_CLIENT_ID=votre_id_client_ici.apps.googleusercontent.com
+     SYNCGDRIVE_CLIENT_SECRET=votre_code_secret_ici
+     ```
+     4. Verrouillez les droits d'accès au fichier pour votre sécurité :
+     ``` Bash
+     chmod 600 ~/.config/syncgdrive/.env
+     ```
+Votre application est maintenant prête à être lancée et authentifiée !
+
+
 ## Utilisation
 
 ```bash
@@ -94,8 +153,9 @@ RUST_LOG=debug syncgdrive
 1. La fenêtre **Réglages** s'ouvre automatiquement
 2. Configurez le **dossier local** à synchroniser
 3. Configurez l'**URL distante** (ex: `gdrive:/MonDrive/Backup`)
-4. Ajustez les **exclusions** si nécessaire
-5. Cliquez **Enregistrer** — la synchronisation démarre
+4. Allez dans la section **Authentification** et cliquez sur **Lier**
+5. Ajustez les **exclusions** si nécessaire
+6. Cliquez **Enregistrer** — la synchronisation démarre
 
 ### Menu systray
 
@@ -130,54 +190,78 @@ Politique de **silence par défaut** — les pop-ups sont réservés aux événe
 Fichier : `~/.config/syncgdrive/config.toml`
 
 ```toml
-local_root = "/home/user/Projets"
-remote_root = "gdrive:/MonDrive/Backup"
 max_workers = 4
-notifications = true
+notifications = false
+rescan_interval_min = 30
+ignore_patterns = [
+]
+
+[[sync_pairs]]
+name = "Nom du couple local-remote"
+local_path = "/home/user/MonDossier/"
+remote_folder_id = "gdrive:/MonDrive/MonDossier/"
+provider = "GoogleDrive"
+active = true
+ignore_patterns = [
+]
 
 [retry]
 max_attempts = 3
 initial_backoff_ms = 300
 max_backoff_ms = 8000
 
-ignore_patterns = [
-    "**/target/**",
-    "**/.git/**",
-    "**/node_modules/**",
-    "**/.sqlx/**",
-    "**/.idea/**",
-]
+[advanced]
+debounce_ms = 500
+health_check_interval_secs = 30
+max_concurrent_ls = 8
+shutdown_timeout_secs = 3
+log_retention_days = 7
+engine_channel_capacity = 32
+notification_timeout_ms = 6000
+resumable_upload_threshold = 5242880
+upload_limit_kbps = 0
+api_rate_limit_rps = 10
+delete_mode = "trash"
+symlink_mode = "ignore"
+
 ```
 
 ## Chemins
 
-| Donnée | Emplacement |
-|---|---|
-| Config | `~/.config/syncgdrive/config.toml` |
-| Base de données | `~/.local/share/syncgdrive/index.db` |
+| Donnée | Emplacement                                       |
+|---|---------------------------------------------------|
+| Config | `~/.config/syncgdrive/config.toml`                |
+| Fichiers d'environnement (API) | `~/.config/syncgdrive/.env`                       |
+| Base de données | `~/.local/share/syncgdrive/index.db`              |
+| Tokens chiffrés | `~/.config/syncgdrive/tokens.enc`                 |
 | Logs (rotation quotidienne) | `~/.local/state/syncgdrive/logs/syncgdrive.log.*` |
-| PID / Lock | `$XDG_RUNTIME_DIR/syncgdrive.lock` |
-| Service systemd | `~/.config/systemd/user/syncgdrive.service` |
+| PID / Lock | `$XDG_RUNTIME_DIR/syncgdrive.lock`                |
+| Service systemd | `~/.config/systemd/user/syncgdrive.service`       |
 
 ## Architecture
 
 ```
 src/
-├── main.rs         Orchestration Tokio + self-pipe POSIX + PID file + instance lock
-├── config.rs       AppConfig TOML + validation
-├── db.rs           SQLite WAL (path, hash SHA-256, mtime)
-├── ignore.rs       IgnoreMatcher globset
-├── kio.rs          Wrapper kioclient5 (trait KioOps)
-├── notif.rs        Notifications bureau (silence par défaut, erreurs + sync initiale)
+├── main.rs             Orchestration Tokio + self-pipe POSIX + PID file + instance lock
+├── config.rs           AppConfig TOML + validation
+├── db.rs               SQLite WAL (path, hash SHA-256, mtime)
+├── ignore.rs           IgnoreMatcher globset
+├── kio.rs              Wrapper kioclient5 (trait KioOps)
+├── auth/       
+│   ├── mod.rs          Déclarations de modules, re-export GoogleAuth et OAuth2
+│   ├── google_auth.rs  Flux d'authentification OAuth2 PKCE + auto-refresh 
+│   └── oauth2.rs       Implémentation générique du flux OAuth2 (utilisé par GoogleAuth) 
+│   └── storage.rs      Abstraction de stockage des tokens (fichier chiffré + verrouillage) + chiffrement AES-256-GCM au repos
+├── notif.rs            Notifications bureau (silence par défaut, erreurs + sync initiale)
 ├── engine/
-│   ├── mod.rs      SyncEngine : boucle principale + Pause/Resume + détection local_root
-│   ├── scan.rs     Scan 4 phases + retry + détection quota
-│   ├── watcher.rs  inotify temps réel + overflow detection
-│   └── worker.rs   Workers de synchronisation
+│   ├── mod.rs          SyncEngine : boucle principale + Pause/Resume + détection local_root
+│   ├── scan.rs         Scan 4 phases + retry + détection quota
+│   ├── watcher.rs      inotify temps réel + overflow detection
+│   └── worker.rs       Workers de synchronisation
 └── ui/
-    ├── mod.rs      Déclarations de modules, re-export spawn_tray
-    ├── tray.rs     Systray ksni : icônes, tooltip dynamique, menu contextuel, À propos
-    └── settings.rs Fenêtre GTK4/libadwaita
+    ├── mod.rs          Déclarations de modules, re-export spawn_tray
+    ├── tray.rs         Systray ksni : icônes, tooltip dynamique, menu contextuel, À propos
+    └── settings.rs     Fenêtre GTK4/libadwaita
 dist/
 └── syncgdrive.service  Fichier de référence pour systemd --user
 ```

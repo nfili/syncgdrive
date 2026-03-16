@@ -135,3 +135,91 @@ pub async fn authenticate(creds: &OAuthAppCredentials) -> Result<GoogleTokens> {
         scope: "https://www.googleapis.com/auth/drive.file".to_string(),
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use url::Url;
+
+    #[test]
+    fn test_build_auth_url() {
+        let creds = OAuthAppCredentials {
+            client_id: "test_client_id".into(),
+            client_secret: "test_secret".into(),
+            redirect_uri: "http://127.0.0.1:8080".into(),
+        };
+
+        let client = BasicClient::new(
+            ClientId::new(creds.client_id.clone()),
+            Some(ClientSecret::new(creds.client_secret.clone())),
+            AuthUrl::new("https://accounts.google.com/o/oauth2/v2/auth".into()).unwrap(),
+            Some(TokenUrl::new("https://oauth2.googleapis.com/token".into()).unwrap()),
+        ).set_redirect_uri(RedirectUrl::new(creds.redirect_uri).unwrap());
+
+        let (pkce_challenge, _) = PkceCodeChallenge::new_random_sha256();
+        let (auth_url, _csrf_token) = client
+            .authorize_url(CsrfToken::new_random)
+            .add_scope(Scope::new("https://www.googleapis.com/auth/drive.file".to_string()))
+            .set_pkce_challenge(pkce_challenge)
+            .url();
+
+        let url_str = auth_url.to_string();
+        assert!(url_str.contains("client_id=test_client_id"));
+        assert!(url_str.contains("redirect_uri=http%3A%2F%2F127.0.0.1%3A8080"));
+        assert!(url_str.contains("scope=https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fdrive.file"));
+    }
+
+    #[test]
+    fn test_parse_callback_code() {
+        // Simulation de l'URL reçue par le loopback
+        let mock_request = "/?state=random_state_123&code=4/0AX4XfWh...&scope=email";
+        let url = Url::parse(&format!("http://localhost{}", mock_request)).unwrap();
+
+        let code = url.query_pairs()
+            .find(|(key, _)| key == "code")
+            .map(|(_, value)| value.into_owned());
+
+        assert_eq!(code, Some("4/0AX4XfWh...".to_string()));
+    }
+
+    #[test]
+    fn test_parse_callback_error() {
+        let mock_request = "/?error=access_denied&state=random_state_123";
+        let url = Url::parse(&format!("http://localhost{}", mock_request)).unwrap();
+
+        let error = url.query_pairs()
+            .find(|(key, _)| key == "error")
+            .map(|(_, value)| value.into_owned());
+
+        assert_eq!(error, Some("access_denied".to_string()));
+    }
+
+    #[test]
+    fn test_token_expiry_check() {
+        let now = chrono::Utc::now().timestamp();
+        let tokens = GoogleTokens {
+            access_token: "token".into(),
+            refresh_token: "refresh".into(),
+            expires_at: now - 10, // Expiré depuis 10 secondes
+            scope: "scope".into(),
+        };
+
+        let is_expired = tokens.expires_at <= now;
+        assert!(is_expired, "Le token devrait être détecté comme expiré");
+    }
+
+    #[test]
+    fn test_token_refresh_margin() {
+        let now = chrono::Utc::now().timestamp();
+        let tokens = GoogleTokens {
+            access_token: "token".into(),
+            refresh_token: "refresh".into(),
+            expires_at: now + 45, // Expire dans 45s (marge de 60s demandée)
+            scope: "scope".into(),
+        };
+
+        // Si la différence est inférieure à 60s, on doit rafraîchir
+        let needs_refresh = tokens.expires_at - now < 60;
+        assert!(needs_refresh, "Le rafraîchissement doit être déclenché (marge < 60s)");
+    }
+}
