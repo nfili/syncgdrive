@@ -156,14 +156,18 @@ pub enum ConfigError {
 
 // ── Chemin de la config ───────────────────────────────────────────────────────
 
-pub fn config_path() -> PathBuf {
+pub fn config_dir() -> PathBuf {
     let base = std::env::var("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| {
             let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
             PathBuf::from(home).join(".config")
         });
-    base.join("syncgdrive").join("config.toml")
+    base.join("syncgdrive")
+}
+
+pub fn config_path() -> PathBuf {
+    config_dir().join("config.toml")
 }
 
 // ── Logique Principale ────────────────────────────────────────────────────────

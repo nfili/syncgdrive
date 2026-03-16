@@ -10,6 +10,10 @@ use sync_g_drive::migration; // <-- Ajout de notre module de migration
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // --- NOUVEAU : Chargement des variables d'environnement ---
+    let env_path = sync_g_drive::config::config_dir().join(".env");
+    let _ = dotenvy::from_path(&env_path); // On ignore l'erreur si le fichier n'existe pas encore
+
     // ── Instance unique (File Lock POSIX) ─────────────────────────────────
     let _lock = acquire_instance_lock();
 
@@ -17,6 +21,16 @@ async fn main() -> Result<()> {
     let log_dir = log_dir();
     cleanup_old_logs(&log_dir, 7);
     let _log_guard = init_logging(&log_dir)?;
+
+    // ── Auto-détection de la session ──────────────────
+    let auth = sync_g_drive::auth::GoogleAuth::new();
+    match auth.get_valid_token().await {
+        Ok(msg) => info!("✅ Google Drive : {}", msg),
+        Err(e) => {
+            warn!("⚠️ Mode déconnecté : {}", e);
+            // Ici, tu pourrais envoyer une commande à l'UI pour afficher un badge rouge
+        }
+    }
 
     // ── Phase 1 : Migration & Configuration ───────────────────────────────
     let config_path = sync_g_drive::config::config_path();

@@ -154,6 +154,80 @@ where
         .build();
     remote_row.add_suffix(&remote_status);
 
+    // --- NOUVEAU : Bouton d'authentification OAuth2 ---
+    let btn_auth = gtk4::Button::builder()
+        .label("Lier un compte Google Drive")
+        .css_classes(["suggested-action", "pill"])
+        .valign(gtk4::Align::Center)
+        .build();
+
+    let auth_row = libadwaita::ActionRow::builder()
+        .title("Authentification")
+        .subtitle("Autorisez l'application à accéder à votre Drive")
+        .build();
+    auth_row.add_suffix(&btn_auth);
+
+    grp_paths.add(&auth_row);
+
+    // On clone l'overlay pour pouvoir afficher des Toasts (notifications in-app)
+    let overlay_clone = toast_overlay.clone();
+
+    btn_auth.connect_clicked(move |btn| {
+        // 1. On désactive le bouton pour éviter le double-clic
+        btn.set_sensitive(false);
+        btn.set_label("En attente du navigateur...");
+
+        let btn_clone = btn.clone();
+        let overlay_ui = overlay_clone.clone();
+
+        // 2. Lancer la tâche asynchrone sur la boucle principale GTK
+        gtk4::glib::MainContext::default().spawn_local(async move {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+
+            // 3. On lance le flux OAuth2 dans un thread totalement isolé
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Runtime::new().expect("Impossible de créer le runtime Tokio temporaire");
+                let res = rt.block_on(async {
+                    let creds = crate::auth::OAuthAppCredentials::default();
+                    crate::auth::oauth2::authenticate(&creds).await
+                });
+                let _ = tx.send(res);
+            });
+
+            // 4. On attend la réponse sans bloquer l'interface GTK
+            let res = rx.await.unwrap_or_else(|_| Err(anyhow::anyhow!("Le thread d'authentification a planté")));
+
+            // Restauration du bouton
+            btn_clone.set_sensitive(true);
+            btn_clone.set_label("Lier un compte Google Drive");
+
+            match res {
+                Ok(tokens) => {
+                    // Instanciation de SystemKeyring
+                    let auth = crate::auth::google_auth::GoogleAuth::new();
+                    if let Err(e) = auth.save_tokens(&tokens) {
+                        tracing::error!("Erreur de stockage keyring: {}", e);
+                    } else {
+                        let toast = libadwaita::Toast::builder()
+                            .title("✅ Compte Google lié avec succès !")
+                            .timeout(5)
+                            .build();
+                        overlay_ui.add_toast(toast);
+                    }
+                }
+                Err(e) => {
+                    tracing::error!("Échec OAuth2: {}", e);
+                    let toast = libadwaita::Toast::builder()
+                        .title(&format!("❌ Erreur : {}", e))
+                        .timeout(7)
+                        .build();
+                    overlay_ui.add_toast(toast);
+                }
+            }
+        });
+    });
+    // --- FIN DU BLOC OAUTH2 ---
+
     grp_paths.add(&local_row);
     grp_paths.add(&remote_row);
     page.add(&grp_paths);

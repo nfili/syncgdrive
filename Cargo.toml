@@ -39,6 +39,7 @@ argon2 = "0.5"       # Fallback : dérivation de clé
 rand = "0.8"
 url = "2.5"
 serde_json = "1.0.149"
+dotenvy = "0.15.7"
 
 [dev-dependencies]
 tempfile = "3"
