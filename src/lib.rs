@@ -80,5 +80,6 @@ pub mod kio;
 pub mod notif;
 pub mod migration;
 pub mod auth;
+pub mod remote;
 #[cfg(feature = "ui")]
 pub mod ui;

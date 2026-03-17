@@ -23,7 +23,7 @@ use crate::kio::{KioClient, KioOps};
 pub enum EngineCommand {
     ForceScan,
     Shutdown,
-    ApplyConfig(AppConfig),
+    ApplyConfig(Arc<AppConfig>),
     Pause,
     Resume,
 }
@@ -78,11 +78,11 @@ pub(crate) enum Task {
 // ── SyncEngine ────────────────────────────────────────────────────────────────
 
 pub struct SyncEngine {
-    cfg: AppConfig,
+    cfg: Arc<AppConfig>,
 }
 
 impl SyncEngine {
-    pub fn new(cfg: AppConfig) -> Self {
+    pub fn new(cfg: Arc<AppConfig>) -> Self {
         Self { cfg }
     }
 

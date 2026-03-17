@@ -22,6 +22,12 @@ pub struct GoogleAuth {
     creds: OAuthAppCredentials,
 }
 
+impl Default for GoogleAuth {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl GoogleAuth {
     pub fn new() -> Self {
         Self {

@@ -37,7 +37,7 @@ pub fn run_standalone(cmd_tx: tokio::sync::mpsc::Sender<EngineCommand>) -> Resul
         let app2 = app.downgrade();
         let tx = cmd_tx.clone();
         let _ = open(Some(app), config, move |new_cfg| {
-            let _ = tx.try_send(EngineCommand::ApplyConfig(new_cfg));
+            let _ = tx.try_send(EngineCommand::ApplyConfig(Arc::new(new_cfg)));
             // Resume envoyé par le shutdown hook ci-dessous, pas ici.
             if let Some(a) = app2.upgrade() {
                 a.quit();
@@ -313,7 +313,7 @@ where
 
                         tracing::error!("Échec OAuth2: {}", e);
                         let toast = libadwaita::Toast::builder()
-                            .title(&format!("❌ Erreur : {}", e))
+                            .title(format!("❌ Erreur : {}", e))
                             .timeout(7)
                             .build();
                         overlay_ui.add_toast(toast);

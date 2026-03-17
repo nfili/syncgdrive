@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use anyhow::{Context, Result};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -92,7 +93,7 @@ async fn main() -> Result<()> {
         ))
     } else {
         // Le SyncEngine prend maintenant la config complète
-        tokio::spawn(SyncEngine::new(cfg.clone()).run(
+        tokio::spawn(SyncEngine::new(Arc::from(cfg.clone())).run(
             db, shutdown.clone(), cmd_rx, status_tx,
         ))
     };

@@ -38,7 +38,13 @@ fn default_resumable_threshold() -> u64 { 5_242_880 }
 fn default_api_rate_limit() -> u32 { 10 }
 fn default_delete_mode() -> String { "trash".into() }
 fn default_symlink_mode() -> String { "ignore".into() }
-
+fn default_api_base() -> String {
+    "https://www.googleapis.com/drive/v3".into()
+}
+fn default_upload_base() -> String {
+    "https://www.googleapis.com/drive/v3/file/upload".into()
+}
+fn default_chunk_threshold() -> u64 { 5 * 1024 * 1024 }
 // ── Structures ────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -87,6 +93,12 @@ pub struct AdvancedConfig {
     pub delete_mode: String,
     #[serde(default = "default_symlink_mode")]
     pub symlink_mode: String,
+    #[serde(default = "default_api_base")]
+    pub api_base: String,
+    #[serde(default = "default_upload_base")]
+    pub upload_base: String,
+    #[serde(default = "default_chunk_threshold")]
+    pub chunk_threshold: u64,
 }
 
 impl Default for AdvancedConfig {
@@ -104,6 +116,9 @@ impl Default for AdvancedConfig {
             api_rate_limit_rps: default_api_rate_limit(),
             delete_mode: default_delete_mode(),
             symlink_mode: default_symlink_mode(),
+            api_base: default_api_base(),
+            upload_base: default_upload_base(),
+            chunk_threshold: default_chunk_threshold(),
         }
     }
 }
