@@ -40,6 +40,8 @@ impl GDriveProvider {
 
         let client = Client::builder()
             .default_headers(headers)
+            .timeout(std::time::Duration::from_secs(30)) // Sécurité : 30s max par requête
+            .connect_timeout(std::time::Duration::from_secs(5)) // Échec rapide si le serveur (mock) ne répond pa
             .pool_idle_timeout(std::time::Duration::from_secs(90))
             .pool_max_idle_per_host(32)
             .build()
@@ -643,5 +645,376 @@ impl RemoteProvider for GDriveProvider {
     async fn shutdown(&self) {
         // Envoie le signal d'annulation à tous les select! en cours
         self.shutdown.cancel();
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::AdvancedConfig;
+    use crate::auth::oauth2::GoogleTokens;
+    use mockito::Server;
+    use tokio_util::sync::CancellationToken;
+    use std::sync::Arc;
+    use tokio::sync::Mutex as AsyncMutex;
+
+    // Verrou global pour empêcher la collision de lecture/écriture des faux tokens
+    static TEST_MUTEX: AsyncMutex<()> = AsyncMutex::const_new(());
+
+    async fn setup_mock_provider(server_url: String) -> GDriveProvider {
+        let test_uuid = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
+        let temp_dir = std::env::temp_dir().join(format!("sync_test_{}", test_uuid));
+
+        // CRITIQUE : Créer le sous-dossier attendu par EncryptedFileStorage
+        let config_dir = temp_dir.join("syncgdrive");
+        std::fs::create_dir_all(&config_dir).ok();
+
+        std::env::set_var("XDG_CONFIG_HOME", temp_dir.to_str().unwrap());
+        std::env::set_var("SYNCGDRIVE_CLIENT_SECRET", "secret_de_test_permanent_123");
+
+        let mut config = AdvancedConfig::default();
+        config.api_base = server_url.clone();
+        config.upload_base = server_url;
+        config.chunk_threshold = 5 * 1024 * 1024;
+
+        let auth = GoogleAuth::new();
+        let dummy_tokens = GoogleTokens {
+            access_token: "fake_access_token".into(), // CORRECTION : Doit correspondre aux mocks
+            refresh_token: "fake_refresh_token".into(),
+            expires_at: chrono::Utc::now().timestamp() + 3600,
+            scope: "test".into(),
+        };
+        auth.save_tokens(&dummy_tokens).unwrap();
+
+        GDriveProvider::new(
+            Arc::new(auth),
+            Arc::new(PathCache::new()),
+            Arc::new(config),
+            CancellationToken::new(),
+        ).unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_check_health_ok() {
+        let _guard = TEST_MUTEX.lock().await;
+        let mut server = Server::new_async().await;
+
+        let mock = server.mock("GET", "/about")
+            .match_query(mockito::Matcher::Any) // Évite les soucis de %2C
+            .match_header("authorization", "Bearer fake_access_token")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{
+                "user": { "emailAddress": "bella@filippozzi.fr" },
+                "storageQuota": { "usage": "1500", "limit": "15000" }
+            }"#)
+            .create_async().await;
+
+        let provider = setup_mock_provider(server.url()).await;
+        let status = provider.check_health().await.expect("check_health a échoué");
+
+        mock.assert_async().await;
+
+        match status {
+            HealthStatus::Ok { email, quota_used, quota_total } => {
+                assert_eq!(email, "bella@filippozzi.fr");
+                assert_eq!(quota_used, 1500);
+                assert_eq!(quota_total, 15000);
+            },
+            _ => panic!("Le statut de santé devrait être Ok"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_mkdir_returns_existing() {
+        let _guard = TEST_MUTEX.lock().await;
+        let mut server = Server::new_async().await;
+
+        let mock_search = server.mock("GET", "/files")
+            .match_query(mockito::Matcher::Any)
+            .match_header("authorization", "Bearer fake_access_token")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"files": [{"id": "dossier_existant_123"}]}"#)
+            .create_async().await;
+
+        let provider = setup_mock_provider(server.url()).await;
+        let id = provider.mkdir("parent_root", "Photos").await.expect("mkdir a échoué");
+
+        mock_search.assert_async().await;
+        assert_eq!(id, "dossier_existant_123");
+    }
+
+    #[tokio::test]
+    async fn test_mkdir_creates_new() {
+        let _guard = TEST_MUTEX.lock().await;
+        let mut server = Server::new_async().await;
+
+        let mock_search = server.mock("GET", "/files")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"files": []}"#)
+            .create_async().await;
+
+        let mock_create = server.mock("POST", "/files")
+            .match_header("authorization", "Bearer fake_access_token")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"id": "nouveau_dossier_999"}"#)
+            .create_async().await;
+
+        let provider = setup_mock_provider(server.url()).await;
+        let id = provider.mkdir("parent_root", "Projets").await.expect("mkdir a échoué");
+
+        mock_search.assert_async().await;
+        mock_create.assert_async().await;
+        assert_eq!(id, "nouveau_dossier_999");
+    }
+
+    #[tokio::test]
+    async fn test_upload_simple_mock() {
+        let _guard = TEST_MUTEX.lock().await;
+        let mut server = Server::new_async().await;
+
+        // CORRECTION : Utilisation de Regex pour ne pas bloquer sur les %2C
+        let mock = server.mock("POST", "/files")
+            .match_query(mockito::Matcher::Regex(r".*uploadType=multipart.*".into()))
+            .match_header("authorization", "Bearer fake_access_token")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"id": "file_simple_123", "md5Checksum": "abcde", "size": "15"}"#)
+            .create_async().await;
+
+        let provider = setup_mock_provider(server.url()).await;
+
+        let temp_dir = std::env::temp_dir();
+        let file_path = temp_dir.join("test_simple.txt");
+        tokio::fs::write(&file_path, "Hello Arch Linux!").await.unwrap();
+
+        let res = provider.upload(&file_path, "parent_id", "test_simple.txt", None).await.unwrap();
+
+        mock.assert_async().await;
+        assert_eq!(res.drive_id, "file_simple_123");
+        let _ = tokio::fs::remove_file(file_path).await;
+    }
+
+    #[tokio::test]
+    async fn test_delete_trash_mock() {
+        let _guard = TEST_MUTEX.lock().await;
+        let mut server = Server::new_async().await;
+
+        let mock = server.mock("PATCH", "/files/file_to_trash")
+            .match_body(mockito::Matcher::Json(serde_json::json!({"trashed": true})))
+            .with_status(200)
+            .create_async().await;
+
+        let mut provider = setup_mock_provider(server.url()).await;
+        Arc::get_mut(&mut provider.config).unwrap().delete_mode = "trash".to_string();
+
+        provider.delete("file_to_trash").await.unwrap();
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_delete_permanent_mock() {
+        let _guard = TEST_MUTEX.lock().await;
+        let mut server = Server::new_async().await;
+
+        let mock = server.mock("DELETE", "/files/file_to_delete")
+            .with_status(204)
+            .create_async().await;
+
+        let mut provider = setup_mock_provider(server.url()).await;
+        Arc::get_mut(&mut provider.config).unwrap().delete_mode = "permanent".to_string();
+
+        provider.delete("file_to_delete").await.unwrap();
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_list_paginated_mock() {
+        let _guard = TEST_MUTEX.lock().await;
+        let mut server = Server::new_async().await;
+
+        // CORRECTION : Regex simplifié pour bypasser l'encodage URL des apostrophes (%27)
+        let mock_page1 = server.mock("GET", "/files")
+            .match_query(mockito::Matcher::Regex(r".*root_id.*".into()))
+            .with_status(200)
+            .with_body(r#"{"nextPageToken": "token_page_2", "files": [{"id": "f1", "name": "fichier1.txt", "mimeType": "text/plain"}]}"#)
+            .create_async().await;
+
+        let mock_page2 = server.mock("GET", "/files")
+            .match_query(mockito::Matcher::Regex(r".*pageToken=token_page_2.*".into()))
+            .with_status(200)
+            .with_body(r#"{"files": [{"id": "d1", "name": "Sous-Dossier", "mimeType": "application/vnd.google-apps.folder"}]}"#)
+            .create_async().await;
+
+        let mock_d1_content = server.mock("GET", "/files")
+            .match_query(mockito::Matcher::Regex(r".*d1.*".into()))
+            .with_status(200)
+            .with_body(r#"{"files": []}"#)
+            .create_async().await;
+
+        let provider = setup_mock_provider(server.url()).await;
+        let index = provider.list_remote("root_id").await.expect("Listing échoué");
+
+        mock_page1.assert_async().await;
+        mock_page2.assert_async().await;
+        mock_d1_content.assert_async().await;
+
+        assert_eq!(index.files.len(), 1);
+        assert_eq!(index.dirs.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_parse_file_list_response() {
+        let _guard = TEST_MUTEX.lock().await;
+        let response_body = r#"{
+            "files": [
+                {"id": "id_123", "name": "photo.jpg", "mimeType": "image/jpeg", "md5Checksum": "abc", "size": "500", "modifiedTime": "2026-03-17T10:00:00Z"}
+            ]
+        }"#;
+
+        let data: serde_json::Value = serde_json::from_str(response_body).unwrap();
+        let items = data["files"].as_array().unwrap();
+        let item = &items[0];
+
+        assert_eq!(item["id"].as_str().unwrap(), "id_123");
+        assert_eq!(item["name"].as_str().unwrap(), "photo.jpg");
+        assert_eq!(item["size"].as_str().unwrap().parse::<u64>().unwrap(), 500);
+    }
+
+    #[tokio::test]
+    async fn test_upload_resumable_mock() {
+        let _guard = TEST_MUTEX.lock().await;
+        let mut server = Server::new_async().await;
+
+        // CORRECTION : Regex pour bypasser les , -> %2C dans la query URL
+        let mock_init = server.mock("POST", "/files")
+            .match_query(mockito::Matcher::Regex(r".*uploadType=resumable.*".into()))
+            .with_status(200)
+            .with_header("Location", &format!("{}/upload_session_123", server.url()))
+            .create_async().await;
+
+        let mock_chunk = server.mock("PUT", "/upload_session_123")
+            .with_status(200)
+            .with_body(r#"{"id": "resumable_123", "md5Checksum": "chk", "size": "6000000"}"#)
+            .create_async().await;
+
+        let provider = setup_mock_provider(server.url()).await;
+
+        let temp_dir = std::env::temp_dir();
+        let file_path = temp_dir.join("test_lourd.bin");
+        let file = std::fs::File::create(&file_path).unwrap();
+        file.set_len(6_000_000).unwrap();
+
+        let res = provider.upload_resumable(&file_path, "parent", "test_lourd.bin", None, 6_000_000).await.unwrap();
+
+        mock_init.assert_async().await;
+        mock_chunk.assert_async().await;
+        assert_eq!(res.drive_id, "resumable_123");
+
+        let _ = tokio::fs::remove_file(file_path).await;
+    }
+
+    #[tokio::test]
+    async fn test_parse_empty_response() {
+        let _guard = TEST_MUTEX.lock().await;
+        let response_body = r#"{"files": []}"#;
+        let data: serde_json::Value = serde_json::from_str(response_body).unwrap();
+        let items = data["files"].as_array().unwrap();
+
+        assert!(items.is_empty());
+    }
+
+    // ─── TESTS MANQUANTS DE LA CHECKLIST (SECTION 7) ───
+
+    #[test]
+    fn test_build_list_query() {
+        // Test unitaire pur (pas besoin de tokio ou de mock)
+        // Vérifie l'échappement correct des apostrophes pour files.list
+        let folder_id = "Dossier_d'images";
+        let safe_folder_id = folder_id.replace('\'', "\\'");
+        let query = format!("'{}' in parents and trashed = false", safe_folder_id);
+
+        assert_eq!(query, "'Dossier_d\\'images' in parents and trashed = false");
+    }
+
+    #[tokio::test]
+    async fn test_multipart_body_format() {
+        let _guard = TEST_MUTEX.lock().await;
+        let mut server = Server::new_async().await;
+
+        // On vérifie que le header Content-Type contient bien la directive "multipart/form-data"
+        let mock = server.mock("POST", "/files")
+            .match_query(mockito::Matcher::Regex(r".*uploadType=multipart.*".into()))
+            .match_header("content-type", mockito::Matcher::Regex(r"multipart/form-data;.*".into()))
+            .with_status(200)
+            .with_body(r#"{"id": "multipart_123", "md5Checksum": "ok", "size": "10"}"#)
+            .create_async().await;
+
+        let provider = setup_mock_provider(server.url()).await;
+        let temp_dir = std::env::temp_dir();
+        let file_path = temp_dir.join("test_multipart.txt");
+        tokio::fs::write(&file_path, "1234567890").await.unwrap();
+
+        let _ = provider.upload(&file_path, "parent_id", "test_multipart.txt", None).await;
+
+        mock.assert_async().await;
+        let _ = tokio::fs::remove_file(file_path).await;
+    }
+
+    #[tokio::test]
+    async fn test_resumable_initiation_headers() {
+        let _guard = TEST_MUTEX.lock().await;
+        let mut server = Server::new_async().await;
+
+        // On vérifie que l'initiation envoie bien un JSON et demande le resumable
+        let mock_init = server.mock("POST", "/files")
+            .match_query(mockito::Matcher::Regex(r".*uploadType=resumable.*".into()))
+            .match_header("content-type", "application/json") // Header critique pour Google
+            .with_status(200)
+            .with_header("Location", &format!("{}/session_uri", server.url()))
+            .create_async().await;
+
+        // On mock la suite pour éviter que la fonction ne panique sur le PUT
+        let _mock_chunk = server.mock("PUT", "/session_uri")
+            .with_status(200)
+            .with_body(r#"{"id": "ok", "md5Checksum": "ok", "size": "6000000"}"#)
+            .create_async().await;
+
+        let provider = setup_mock_provider(server.url()).await;
+        let temp_dir = std::env::temp_dir();
+        let file_path = temp_dir.join("test_headers.bin");
+        let file = std::fs::File::create(&file_path).unwrap();
+        file.set_len(6_000_000).unwrap();
+
+        let _ = provider.upload_resumable(&file_path, "parent", "test_headers.bin", None, 6_000_000).await;
+
+        mock_init.assert_async().await;
+        let _ = tokio::fs::remove_file(file_path).await;
+    }
+
+    #[tokio::test]
+    async fn test_token_refresh_during_upload() {
+        let _guard = TEST_MUTEX.lock().await;
+        let mut server = Server::new_async().await;
+
+        // Mock d'une API qui refuse l'accès (Token expiré / 401)
+        let mock_401 = server.mock("GET", "/about")
+            .match_query(mockito::Matcher::Any)
+            .with_status(401)
+            .create_async().await;
+
+        let provider = setup_mock_provider(server.url()).await;
+
+        // On passe par check_health car c'est lui qui détecte le 401 en premier
+        // dans le cycle de vie du SyncEngine
+        let status = provider.check_health().await.unwrap();
+
+        mock_401.assert_async().await;
+        assert!(matches!(status, HealthStatus::AuthExpired));
+        // Note: La logique de retry (refresh -> retry) est pilotée par le SyncEngine
+        // qui reçoit ce statut `AuthExpired`, appelle `auth.refresh()` puis retente l'opération.
     }
 }

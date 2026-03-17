@@ -40,8 +40,10 @@ rand = "0.8"
 url = "2.5"
 serde_json = "1.0.149"
 dotenvy = "0.15.7"
+uuid = { version = "1.22", features = ["v4", "fast-rng"] }
 
 [dev-dependencies]
+mockito = "1.7.2"
 tempfile = "3"
 
 [dependencies.gtk4]
