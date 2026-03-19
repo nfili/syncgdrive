@@ -42,7 +42,7 @@ fn default_api_base() -> String {
     "https://www.googleapis.com/drive/v3".into()
 }
 fn default_upload_base() -> String {
-    "https://www.googleapis.com/drive/v3/file/upload".into()
+    "https://www.googleapis.com/upload/drive/v3".into()
 }
 fn default_chunk_threshold() -> u64 { 5 * 1024 * 1024 }
 // ── Structures ────────────────────────────────────────────────────────────────
