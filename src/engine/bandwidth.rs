@@ -1,0 +1,333 @@
+//! Module de suivi de progression et de limitation de bande passante.
+
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
+
+/// Instantané des compteurs pour l'UI (évite de bloquer les threads)
+#[derive(Debug, Clone)]
+pub struct ProgressSnapshot {
+    pub total_files: usize,
+    pub done_files: usize,
+    pub total_bytes: u64,
+    pub sent_bytes: u64,
+    pub current_file_size: u64,
+    pub current_bytes_sent: u64,
+    pub current_dir: String,
+    pub current_name: String,
+    pub speed_bps: u64,
+    pub eta_string: String,
+}
+
+struct TrackerState {
+    pub current_dir: String,
+    pub current_name: String,
+    pub current_file_size: u64,
+    pub current_bytes_sent: u64,
+    pub speed_samples: VecDeque<(Instant, u64)>,
+}
+
+/// Compteurs atomiques partagés entre les workers.
+/// Optimisé pour zéro blocage sur le chemin critique de l'upload.
+pub struct ProgressTracker {
+    pub total_files: AtomicUsize,
+    pub done_files: AtomicUsize,
+    pub total_bytes: AtomicU64,
+    pub sent_bytes: AtomicU64,
+    state: Mutex<TrackerState>,
+}
+
+impl ProgressTracker {
+    pub fn new() -> Self {
+        Self {
+            total_files: AtomicUsize::new(0),
+            done_files: AtomicUsize::new(0),
+            total_bytes: AtomicU64::new(0),
+            sent_bytes: AtomicU64::new(0),
+            state: Mutex::new(TrackerState {
+                current_dir: String::new(),
+                current_name: String::new(),
+                current_file_size: 0,
+                current_bytes_sent: 0,
+                speed_samples: VecDeque::new(),
+            }),
+        }
+    }
+
+    /// Définit le fichier actuellement en cours de traitement (pour l'affichage)
+    pub fn set_current_file(&self, dir: String, name: String, size: u64) {
+        let mut state = self.state.lock().unwrap();
+        state.current_dir = dir;
+        state.current_name = name;
+        state.current_file_size = size;
+        state.current_bytes_sent = 0;
+    }
+
+    /// Enregistre les octets envoyés (appelé très fréquemment par les chunks reqwest)
+    pub fn record_bytes(&self, n: u64) {
+        let current_total = self.sent_bytes.fetch_add(n, Ordering::Relaxed) + n;
+
+        let mut state = self.state.lock().unwrap();
+        state.current_bytes_sent += n;
+
+        let now = Instant::now();
+        state.speed_samples.push_back((now, current_total));
+
+        // Nettoyage de la fenêtre glissante (on garde les 5 dernières secondes)
+        while let Some(&(ts, _)) = state.speed_samples.front() {
+            if now.duration_since(ts).as_secs_f64() > 5.0 {
+                state.speed_samples.pop_front();
+            } else {
+                break;
+            }
+        }
+    }
+
+    /// Calcule la vitesse instantanée (fenêtre de 5s)
+    pub fn speed_bps(&self) -> u64 {
+        let state = self.state.lock().unwrap();
+        if state.speed_samples.len() < 2 {
+            return 0;
+        }
+
+        let (first_ts, first_bytes) = state.speed_samples.front().unwrap();
+        let (last_ts, last_bytes) = state.speed_samples.back().unwrap();
+
+        let elapsed = last_ts.duration_since(*first_ts).as_secs_f64();
+        if elapsed <= 0.0 {
+            return 0;
+        }
+
+        let sent = last_bytes.saturating_sub(*first_bytes);
+        (sent as f64 / elapsed) as u64
+    }
+
+    /// Estime le temps restant en secondes
+    pub fn eta_secs(&self) -> Option<u64> {
+        let speed = self.speed_bps();
+        if speed == 0 {
+            return None;
+        }
+        let total = self.total_bytes.load(Ordering::Relaxed);
+        let sent = self.sent_bytes.load(Ordering::Relaxed);
+        if sent >= total {
+            return Some(0);
+        }
+        Some((total - sent) / speed)
+    }
+
+    /// Formate l'ETA en chaîne lisible par l'humain
+    pub fn human_eta(&self) -> String {
+        match self.eta_secs() {
+            None => "⏳ En attente…".to_string(),
+            Some(secs) if secs < 60 => format!("~{} s restantes", secs),
+            Some(secs) if secs < 3600 => format!("~{} min restantes", secs / 60),
+            Some(secs) => format!("~{} h restantes", secs / 3600),
+        }
+    }
+
+    /// Génère un instantané pour l'UI sans bloquer
+    pub fn snapshot(&self) -> ProgressSnapshot {
+        let state = self.state.lock().unwrap();
+        // On calcule la vitesse pendant qu'on a le lock
+        let speed_bps = if state.speed_samples.len() >= 2 {
+            let (first_ts, first_bytes) = state.speed_samples.front().unwrap();
+            let (last_ts, last_bytes) = state.speed_samples.back().unwrap();
+            let elapsed = last_ts.duration_since(*first_ts).as_secs_f64();
+            if elapsed > 0.0 {
+                ((last_bytes.saturating_sub(*first_bytes)) as f64 / elapsed) as u64
+            } else {
+                0
+            }
+        } else {
+            0
+        };
+
+        ProgressSnapshot {
+            total_files: self.total_files.load(Ordering::Relaxed),
+            done_files: self.done_files.load(Ordering::Relaxed),
+            total_bytes: self.total_bytes.load(Ordering::Relaxed),
+            sent_bytes: self.sent_bytes.load(Ordering::Relaxed),
+            current_file_size: state.current_file_size,
+            current_bytes_sent: state.current_bytes_sent,
+            current_dir: state.current_dir.clone(),
+            current_name: state.current_name.clone(),
+            speed_bps,
+            eta_string: self.human_eta(),
+        }
+    }
+}
+
+/// État interne du Token Bucket
+struct BucketState {
+    tokens: f64,
+    last_refill: Instant,
+}
+
+/// Limiteur de bande passante (Algorithme du Token Bucket)
+pub struct BandwidthLimiter {
+    limit_bps: u64, // 0 = illimité
+    state: Mutex<BucketState>,
+}
+
+impl BandwidthLimiter {
+    pub fn new(limit_kbps: u64) -> Self {
+        let limit_bps = limit_kbps * 1024;
+        Self {
+            limit_bps,
+            state: Mutex::new(BucketState {
+                tokens: limit_bps as f64, // Commence plein (1 seconde de tokens)
+                last_refill: Instant::now(),
+            }),
+        }
+    }
+
+    /// Bloque jusqu'à ce que `n` octets soient autorisés à être envoyés.
+    pub async fn acquire(&self, n: u64) {
+        if self.limit_bps == 0 {
+            return; // Illimité
+        }
+
+        loop {
+            let delay = {
+                let mut state = self.state.lock().unwrap();
+                let now = Instant::now();
+                let elapsed = now.duration_since(state.last_refill).as_secs_f64();
+
+                // Ajout des tokens générés depuis le dernier appel
+                state.tokens += elapsed * (self.limit_bps as f64);
+                // On capte à un maximum de 1 seconde de burst
+                if state.tokens > self.limit_bps as f64 {
+                    state.tokens = self.limit_bps as f64;
+                }
+                state.last_refill = now;
+
+                if state.tokens >= n as f64 {
+                    state.tokens -= n as f64;
+                    None // On a assez de tokens, on passe
+                } else {
+                    // Calcul du temps d'attente nécessaire pour obtenir les tokens manquants
+                    let needed = n as f64 - state.tokens;
+                    let wait_secs = needed / (self.limit_bps as f64);
+                    Some(Duration::from_secs_f64(wait_secs))
+                }
+            };
+
+            if let Some(d) = delay {
+                tokio::time::sleep(d).await;
+            } else {
+                break;
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_progress_tracker_record_bytes() {
+        let tracker = ProgressTracker::new();
+        tracker.record_bytes(1024);
+        tracker.record_bytes(2048);
+        assert_eq!(tracker.sent_bytes.load(Ordering::Relaxed), 3072);
+        assert_eq!(tracker.snapshot().current_bytes_sent, 3072);
+    }
+
+    #[test]
+    fn test_progress_tracker_eta_zero_speed() {
+        let tracker = ProgressTracker::new();
+        tracker.total_bytes.store(10000, Ordering::Relaxed);
+        // Pas d'échantillons = vitesse 0
+        assert_eq!(tracker.eta_secs(), None);
+        assert_eq!(tracker.human_eta(), "⏳ En attente…");
+    }
+
+    #[test]
+    fn test_human_eta_format() {
+        let tracker = ProgressTracker::new();
+        tracker.total_bytes.store(100, Ordering::Relaxed); // Fake data to bypass safety checks if we mock speed
+        // Pour tester le format pur, on peut juste vérifier la logique (simulée via de vrais ajouts ou via une fonction helper).
+        // On va plutôt injecter des samples artificiels pour générer une vitesse connue :
+        let mut state = tracker.state.lock().unwrap();
+        let now = Instant::now();
+        state.speed_samples.push_back((now - Duration::from_secs(2), 0));
+        state.speed_samples.push_back((now, 200)); // 100 bps
+        drop(state);
+
+        assert_eq!(tracker.speed_bps(), 100);
+
+        // Reste 4500 octets / 100 bps = 45 s
+        tracker.total_bytes.store(4500, Ordering::Relaxed);
+        assert_eq!(tracker.human_eta(), "~45 s restantes");
+
+        // Reste 18000 octets / 100 bps = 180 s (3 min)
+        tracker.total_bytes.store(18000, Ordering::Relaxed);
+        assert_eq!(tracker.human_eta(), "~3 min restantes");
+
+        // Reste 360000 octets / 100 bps = 3600 s (1 h)
+        tracker.total_bytes.store(360000, Ordering::Relaxed);
+        assert_eq!(tracker.human_eta(), "~1 h restantes");
+    }
+
+    #[tokio::test]
+    async fn test_bandwidth_limiter_unlimited() {
+        let limiter = BandwidthLimiter::new(0);
+        let start = Instant::now();
+        limiter.acquire(10_000_000).await; // 10 Mo
+        assert!(start.elapsed() < Duration::from_millis(5), "Illimité doit retourner immédiatement");
+    }
+
+    #[tokio::test]
+    async fn test_bandwidth_limiter_throttle() {
+        let limiter = BandwidthLimiter::new(10); // 10 Ko/s
+
+        // On vide le bucket manuellement pour le test
+        limiter.state.lock().unwrap().tokens = 0.0;
+
+        let start = Instant::now();
+        // Pour avoir 10 Ko (10240 octets) à 10 Ko/s, il faut attendre ~1 seconde.
+        // On demande 5 Ko (5120), on devrait attendre ~0.5s.
+        limiter.acquire(5120).await;
+        let elapsed = start.elapsed();
+
+        assert!(elapsed >= Duration::from_millis(450), "Le limiteur n'a pas ralenti le flux. Durée: {:?}", elapsed);
+        assert!(elapsed < Duration::from_millis(600), "Le limiteur est trop lent. Durée: {:?}", elapsed);
+    }
+
+    #[test]
+    fn test_progress_tracker_speed() {
+        let tracker = ProgressTracker::new();
+
+        // On simule manuellement l'historique pour valider la formule mathématique
+        let mut state = tracker.state.lock().unwrap();
+        let now = Instant::now();
+
+        // On a envoyé 0 octets il y a 2 secondes
+        state.speed_samples.push_back((now - Duration::from_secs(2), 0));
+        // On a envoyé 5000 octets maintenant
+        state.speed_samples.push_back((now, 5000));
+        drop(state);
+
+        // La vitesse doit être exactement de 2500 octets/seconde
+        assert_eq!(tracker.speed_bps(), 2500);
+    }
+
+    #[test]
+    fn test_progress_snapshot_accuracy() {
+        let tracker = ProgressTracker::new();
+
+        // On bombarde le tracker avec 100 appels très rapides de 10 octets
+        for _ in 0..100 {
+            tracker.record_bytes(10);
+        }
+
+        let snap = tracker.snapshot();
+
+        // Le snapshot DOIT refléter la somme exacte, sans aucune perte
+        assert_eq!(snap.current_bytes_sent, 1000, "Le snapshot a perdu des octets locaux");
+        assert_eq!(tracker.sent_bytes.load(Ordering::Relaxed), 1000, "Les compteurs atomiques ont divergé");
+    }
+}

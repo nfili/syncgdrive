@@ -56,8 +56,8 @@ pub fn spawn_tray(
                                     let stop = matches!(s, EngineStatus::Stopped);
                                     handle.update(move |tray: &mut SyncTray| {
                                         // Tracker le dernier fichier synchronisé
-                                        if let EngineStatus::SyncProgress { ref current, .. } = s {
-                                            tray.last_synced = current.clone();
+                                        if let EngineStatus::SyncProgress(ref snap) = s {
+                                            tray.last_synced = snap.current_name.clone();
                                         }
                                         // Notification "Sync initiale terminée" (une seule fois)
                                         if matches!(s, EngineStatus::Idle)
@@ -153,8 +153,8 @@ impl ksni::Tray for SyncTray {
                     format!("SyncGDrive — {label}…")
                 }
             }
-            EngineStatus::SyncProgress { done, total, current, .. } =>
-                format!("SyncGDrive — ↑ {done}/{total} {current}"),
+            EngineStatus::SyncProgress(snap) =>
+                format!("SyncGDrive — ↑ {}/{} {}", snap.done_files, snap.total_files, snap.current_name),
             EngineStatus::Syncing { active } =>
                 format!("SyncGDrive — {active} transfert(s)"),
             EngineStatus::Paused          => "SyncGDrive — ⏸ En pause".into(),
@@ -240,14 +240,21 @@ impl ksni::Tray for SyncTray {
                 }
             }
             // §7A : "Envoi en cours : 80% [████████░░]\nFichier : rapport.pdf\nPoids : 4.2 Mo (8 / 10 fichiers)"
-            EngineStatus::SyncProgress { done, total, current, size_bytes } => {
-                let pct = if *total > 0 { (*done as f64 / *total as f64) * 100.0 } else { 0.0 };
-                let bar = progress_bar(pct, 10);
-                let size = human_size(*size_bytes);
+            EngineStatus::SyncProgress(snap) => {
+                let file_pct = if snap.current_file_size > 0 { (snap.current_bytes_sent as f64 / snap.current_file_size as f64) * 100.0 } else { 0.0 };
+                let global_pct = if snap.total_bytes > 0 { (snap.sent_bytes as f64 / snap.total_bytes as f64) * 100.0 } else { 0.0 };
+                let bar = progress_bar(global_pct, 10);
+                let size = human_size(snap.current_file_size);
+                let speed = human_size(snap.speed_bps);
+
                 (
-                    format!("SyncGDrive — Transfert {done}/{total}"),
+                    format!("SyncGDrive — Transfert {}/{}", snap.done_files, snap.total_files),
                     format!(
-                        "Envoi en cours : {pct:.0}% {bar}\nFichier : {current}\nPoids : {size} ({done} / {total} fichiers)"
+                        "Fichier : {} ({file_pct:.0}%)\nPoids : {size}\n[Global] {global_pct:.0}% {bar}\nVitesse : {speed}/s\n{}\nOctets : {} / {}",
+                        snap.current_name,
+                        snap.eta_string, // <-- NOUVEAU
+                        human_size(snap.sent_bytes),
+                        human_size(snap.total_bytes)
                     ),
                 )
             }

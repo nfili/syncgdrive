@@ -100,6 +100,7 @@ async fn main() -> Result<()> {
     };
 
     // ── Systray ksni ─────────────────────────────────────────────────────────
+    let shutdown_timeout = cfg.advanced.shutdown_timeout_secs;
     #[cfg(feature = "ui")]
     {
         sync_g_drive::ui::spawn_tray(
@@ -136,8 +137,8 @@ async fn main() -> Result<()> {
 
     tokio::select! {
         _ = engine => { info!("moteur arrêté proprement"); }
-        _ = tokio::time::sleep(std::time::Duration::from_secs(cfg.advanced.shutdown_timeout_secs)) => {
-            warn!("timeout {}s dépassé — sortie forcée",cfg.advanced.shutdown_timeout_secs);
+        _ = tokio::time::sleep(std::time::Duration::from_secs(shutdown_timeout)) => {
+            warn!("timeout {}s dépassé — sortie forcée",shutdown_timeout);
         }
     }
 

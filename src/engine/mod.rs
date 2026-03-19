@@ -1,6 +1,7 @@
 pub mod scan;
 pub mod watcher;
 pub mod worker;
+pub mod bandwidth;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -38,12 +39,7 @@ pub enum EngineStatus {
         total: usize,
         current: String,
     },
-    SyncProgress {
-        done: usize,
-        total: usize,
-        current: String,
-        size_bytes: u64,
-    },
+    SyncProgress(bandwidth::ProgressSnapshot),
     Syncing { active: usize },
     Paused,
     Error(String),
@@ -178,8 +174,9 @@ impl SyncEngine {
 
         let sem = Arc::new(Semaphore::new(self.cfg.max_workers.max(1)));
         let active = Arc::new(AtomicUsize::new(0));
-        let total_queued = Arc::new(AtomicUsize::new(0));
-        let total_done = Arc::new(AtomicUsize::new(0));
+
+        let tracker = Arc::new(crate::engine::bandwidth::ProgressTracker::new());
+        tokio::spawn(progress_publisher(tracker.clone(), status_tx.clone(), shutdown.clone()));
 
         let mut overflow_tick = tokio::time::interval_at(
             tokio::time::Instant::now() + std::time::Duration::from_secs(self.cfg.advanced.health_check_interval_secs),
@@ -209,8 +206,10 @@ impl SyncEngine {
                                 if rescan_on_resume {
                                     rescan_on_resume = false;
                                     info!("engine: rescan after config change");
-                                    total_queued.store(0, Ordering::Relaxed);
-                                    total_done.store(0, Ordering::Relaxed);
+                                    tracker.total_files.store(0, Ordering::Relaxed);
+                                    tracker.done_files.store(0, Ordering::Relaxed);
+                                    tracker.total_bytes.store(0, Ordering::Relaxed);
+                                    tracker.sent_bytes.store(0, Ordering::Relaxed);
                                     let _ = status_tx.send(EngineStatus::Syncing { active: 0 });
                                     let ig = IgnoreMatcher::from_patterns(&self.cfg.ignore_patterns)?;
                                     tokio::select! {
@@ -271,8 +270,10 @@ impl SyncEngine {
                         Some(EngineCommand::Resume) => {}
                         Some(EngineCommand::ForceScan) => {
                             info!("engine: force scan requested");
-                            total_queued.store(0, Ordering::Relaxed);
-                            total_done.store(0, Ordering::Relaxed);
+                            tracker.total_files.store(0, Ordering::Relaxed);
+                            tracker.done_files.store(0, Ordering::Relaxed);
+                            tracker.total_bytes.store(0, Ordering::Relaxed);
+                            tracker.sent_bytes.store(0, Ordering::Relaxed);
                             let _ = status_tx.send(EngineStatus::Syncing { active: 0 });
                             let ignore2 = IgnoreMatcher::from_patterns(&self.cfg.ignore_patterns)?;
                             tokio::select! {
@@ -298,8 +299,10 @@ impl SyncEngine {
                                 watcher = watcher::Watcher::start(&self.cfg.sync_pairs[0].local_path, tx2)?;
                                 spawn_debounced_dispatch(rx2, task_tx.clone(), shutdown.clone(),self.cfg.advanced.debounce_ms);
                                 let ignore3 = IgnoreMatcher::from_patterns(&self.cfg.ignore_patterns)?;
-                                total_queued.store(0, Ordering::Relaxed);
-                                total_done.store(0, Ordering::Relaxed);
+                                tracker.total_files.store(0, Ordering::Relaxed);
+                                tracker.done_files.store(0, Ordering::Relaxed);
+                                tracker.total_bytes.store(0, Ordering::Relaxed);
+                                tracker.sent_bytes.store(0, Ordering::Relaxed);
                                 let _ = status_tx.send(EngineStatus::Syncing { active: 0 });
                                 tokio::select! {
                                     r = scan::run(&self.cfg, &db, &ignore3, &provider, &path_cache, &task_tx, &shutdown, &status_tx) => {
@@ -331,8 +334,10 @@ impl SyncEngine {
 
                     if watcher.take_overflow() {
                         warn!("engine: événements inotify perdus — rescan de rattrapage");
-                        total_queued.store(0, Ordering::Relaxed);
-                        total_done.store(0, Ordering::Relaxed);
+                        tracker.total_files.store(0, Ordering::Relaxed);
+                        tracker.done_files.store(0, Ordering::Relaxed);
+                        tracker.total_bytes.store(0, Ordering::Relaxed);
+                        tracker.sent_bytes.store(0, Ordering::Relaxed);
                         let _ = status_tx.send(EngineStatus::Syncing { active: 0 });
                         let ignore_o = IgnoreMatcher::from_patterns(&self.cfg.ignore_patterns)?;
                         tokio::select! {
@@ -350,8 +355,10 @@ impl SyncEngine {
 
                 _ = rescan_tick.tick(), if rescan_enabled => {
                     info!("engine: rescan périodique (toutes les {} min)", self.cfg.rescan_interval_min);
-                    total_queued.store(0, Ordering::Relaxed);
-                    total_done.store(0, Ordering::Relaxed);
+                    tracker.total_files.store(0, Ordering::Relaxed);
+                    tracker.done_files.store(0, Ordering::Relaxed);
+                    tracker.total_bytes.store(0, Ordering::Relaxed);
+                    tracker.sent_bytes.store(0, Ordering::Relaxed);
                     let _ = status_tx.send(EngineStatus::Syncing { active: 0 });
                     let ignore_r = IgnoreMatcher::from_patterns(&self.cfg.ignore_patterns)?;
                     tokio::select! {
@@ -369,7 +376,7 @@ impl SyncEngine {
                 maybe_task = task_rx.recv() => {
                     let Some(task) = maybe_task else { break; };
 
-                    let (file_name, file_size) = match &task {
+                    let (_file_name, file_size) = match &task {
                         Task::SyncFile { ref path } => (
                             path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
                             std::fs::metadata(path).map(|m| m.len()).unwrap_or(0),
@@ -384,54 +391,37 @@ impl SyncEngine {
                         ),
                     };
 
-                    let queued = total_queued.fetch_add(1, Ordering::Relaxed) + 1;
+                    tracker.total_files.fetch_add(1, Ordering::Relaxed);
+                    tracker.total_bytes.fetch_add(file_size, Ordering::Relaxed);
 
                     let permit = sem.clone().acquire_owned().await
                         .context("semaphore closed")?;
                     let db2 = db.clone();
-
-                    // Clonage des Arcs pour le thread
                     let provider2 = provider.clone();
                     let path_cache2 = path_cache.clone();
-
                     let cfg2 = self.cfg.clone();
                     let sd2 = shutdown.clone();
                     let stx2 = status_tx.clone();
                     let active2 = active.clone();
-                    let done2 = total_done.clone();
-                    let queued2 = total_queued.clone();
+
+                    let tracker2 = tracker.clone(); // <-- INDISPENSABLE !
                     let ignore_pat = self.cfg.ignore_patterns.clone();
 
                     active2.fetch_add(1, Ordering::Relaxed);
 
-                    let _ = stx2.send(EngineStatus::SyncProgress {
-                        done: total_done.load(Ordering::Relaxed),
-                        total: queued,
-                        current: file_name,
-                        size_bytes: file_size,
-                    });
-
                     tokio::spawn(async move {
-                        let _permit = permit;
+                       let _permit = permit;
                         if sd2.is_cancelled() {
-                            let done_now = done2.fetch_add(1, Ordering::Relaxed) + 1;
+                            tracker2.done_files.fetch_add(1, Ordering::Relaxed);
                             let prev = active2.fetch_sub(1, Ordering::Relaxed);
-                            if prev == 1 {
-                                let _ = stx2.send(EngineStatus::Idle);
-                            } else {
-                                let _ = stx2.send(EngineStatus::SyncProgress {
-                                    done: done_now,
-                                    total: queued2.load(Ordering::Relaxed),
-                                    current: String::new(),
-                                    size_bytes: 0,
-                                });
-                            }
+                            if prev == 1 { let _ = stx2.send(EngineStatus::Idle); }
                             return;
                         }
+
                         let ignore = IgnoreMatcher::from_patterns(&ignore_pat).unwrap();
 
-                        // Appel au nouveau worker sans Bash !
-                        if let Err(e) = worker::handle(task, &cfg2, &db2, &provider2, &path_cache2, &ignore, &sd2).await {
+                        // Appel au worker AVEC le tracker !
+                        if let Err(e) = worker::handle(task, &cfg2, &db2, &provider2, &path_cache2, &ignore, tracker2.clone(), &sd2).await {
                             if !is_shutdown_err(&e) && !sd2.is_cancelled() {
                                 error!(error = %e, "worker task failed");
                                 let _ = stx2.send(EngineStatus::Error(e.to_string()));
@@ -442,17 +432,11 @@ impl SyncEngine {
                                 }
                             }
                         }
-                        let done_now = done2.fetch_add(1, Ordering::Relaxed) + 1;
+
+                        tracker2.done_files.fetch_add(1, Ordering::Relaxed);
                         let prev = active2.fetch_sub(1, Ordering::Relaxed);
                         if prev == 1 {
                             let _ = stx2.send(EngineStatus::Idle);
-                        } else {
-                            let _ = stx2.send(EngineStatus::SyncProgress {
-                                done: done_now,
-                                total: queued2.load(Ordering::Relaxed),
-                                current: String::new(),
-                                size_bytes: 0,
-                            });
                         }
                     });
                 }
@@ -572,6 +556,29 @@ pub async fn run_unconfigured(
     Ok(())
 }
 
+/// Tâche de fond qui publie la progression toutes les 200ms
+pub(crate) async fn progress_publisher(
+    tracker: Arc<bandwidth::ProgressTracker>,
+    status_tx: mpsc::UnboundedSender<EngineStatus>,
+    shutdown: CancellationToken,
+) {
+    let mut interval = tokio::time::interval(std::time::Duration::from_millis(200));
+    loop {
+        tokio::select! {
+            _ = interval.tick() => {
+                let snap = tracker.snapshot();
+                // On publie uniquement si on est activement en train de synchroniser
+                if snap.total_files > 0 && snap.done_files < snap.total_files {
+                    let _ = status_tx.send(EngineStatus::SyncProgress(snap));
+                }
+            }
+            _ = shutdown.cancelled() => {
+                break;
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -632,5 +639,41 @@ mod tests {
         let elapsed = start.elapsed().as_millis() as u64;
 
         assert!(elapsed >= configured_debounce, "Le debounce n'a pas respecté la configuration ! Attendu >= {}, reçu {}", configured_debounce, elapsed);
+    }
+
+    #[tokio::test]
+    async fn test_progress_publisher_throttle() {
+        let (status_tx, mut status_rx) = mpsc::unbounded_channel();
+        let shutdown = CancellationToken::new();
+        let tracker = Arc::new(crate::engine::bandwidth::ProgressTracker::new());
+
+        // On simule une synchronisation en cours (sinon le publisher reste silencieux)
+        tracker.total_files.store(10, std::sync::atomic::Ordering::Relaxed);
+        tracker.done_files.store(5, std::sync::atomic::Ordering::Relaxed);
+
+        // On lance le publisher (qui est censé émettre toutes les 200ms)
+        tokio::spawn(super::progress_publisher(tracker.clone(), status_tx, shutdown.clone()));
+
+        // On bombarde le tracker de 1000 mises à jour instantanément
+        for _ in 0..1000 {
+            tracker.record_bytes(1024);
+        }
+
+        // On laisse juste le temps au publisher de faire son tick de 200ms
+        tokio::time::sleep(tokio::time::Duration::from_millis(250)).await;
+        shutdown.cancel(); // On coupe le publisher
+
+        // On compte combien de fois l'UI a été notifiée
+        let mut count = 0;
+        while let Ok(msg) = status_rx.try_recv() {
+            if let EngineStatus::SyncProgress(_) = msg {
+                count += 1;
+            }
+        }
+
+        // C'est la magie de notre architecture : malgré 1000 mises à jour du transfert,
+        // l'interface n'aura reçu qu'1 (ou maximum 2) rafraîchissements !
+        assert!(count >= 1, "Le publisher n'a rien publié !");
+        assert!(count <= 2, "Le publisher n'a pas throttlé ! Snapshots reçus : {}", count);
     }
 }

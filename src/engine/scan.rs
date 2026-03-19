@@ -246,11 +246,11 @@ pub(crate) async fn run(
             .unwrap_or_default();
         let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
 
-        let _ = status_tx.send(EngineStatus::SyncProgress {
+        let _ = status_tx.send(EngineStatus::ScanProgress {
+            phase: crate::engine::ScanPhase::Comparing, // Indique qu'on est en train de comparer/préparer
             done: i + 1,
             total: sync_total,
             current: file_name.clone(),
-            size_bytes: size,
         });
 
         if i % 25 == 0 || i + 1 == sync_total {

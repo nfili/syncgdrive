@@ -22,7 +22,8 @@ pub trait RemoteProvider: Send + Sync {
         local_path: &Path,
         parent_id: &str,
         file_name: &str,
-        existing_id: Option<&str>,  // None = create, Some = update (overwrite)
+        existing_id: Option<&str>,
+        tracker: std::sync::Arc<crate::engine::bandwidth::ProgressTracker>, // <-- NOUVEAU
     ) -> Result<UploadResult>;
 
     /// Supprime ou met à la corbeille un fichier/dossier distant.

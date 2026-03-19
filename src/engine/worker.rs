@@ -9,11 +9,13 @@ use tracing::debug;
 
 use crate::config::AppConfig;
 use crate::db::{Database, FileEntry};
+use crate::engine::bandwidth::ProgressTracker;
 use crate::engine::scan::retry;
 use crate::engine::Task;
 use crate::ignore::IgnoreMatcher;
 use crate::remote::{path_cache::PathCache, RemoteProvider};
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle(
     task: Task,
     cfg: &AppConfig,
@@ -21,12 +23,13 @@ pub(crate) async fn handle(
     provider: &Arc<dyn RemoteProvider>,
     path_cache: &Arc<PathCache>,
     ignore: &IgnoreMatcher,
+    tracker: Arc<ProgressTracker>,
     shutdown: &CancellationToken,
 ) -> Result<()> {
     match task {
-        Task::SyncFile { path, .. } => sync_file(&path, cfg, db, provider, path_cache, ignore, shutdown).await,
+        Task::SyncFile { path, .. } => sync_file(&path, cfg, db, provider, path_cache, ignore, tracker, shutdown).await,
         Task::Delete(path)          => delete(&path, cfg, db, provider, path_cache, ignore, shutdown).await,
-        Task::Rename { from, to }   => rename(&from, &to, cfg, db, provider, path_cache, ignore, shutdown).await,
+        Task::Rename { from, to }   => rename(&from, &to, cfg, db, provider, path_cache, ignore, tracker, shutdown).await,
     }
 }
 
@@ -39,6 +42,7 @@ async fn sync_file(
     provider: &Arc<dyn RemoteProvider>,
     path_cache: &Arc<PathCache>,
     ignore: &IgnoreMatcher,
+    tracker: Arc<ProgressTracker>,
     shutdown: &CancellationToken,
 ) -> Result<()> {
     if ignore.is_ignored(path) { return Ok(()); }
@@ -88,8 +92,10 @@ async fn sync_file(
     let existing_id = existing_entry.as_ref().map(|e| e.drive_id.as_str());
 
     // Upload !
+    let parent_dir = path.parent().unwrap_or_else(|| Path::new("")).to_string_lossy().to_string();
+    tracker.set_current_file(parent_dir, file_name.clone(), file_size);
     let res = retry(cfg, shutdown, "upload", || async {
-        provider.upload(path, &parent_id, &file_name, existing_id).await
+        provider.upload(path, &parent_id, &file_name, existing_id, tracker.clone()).await
     }).await?;
 
     // On passe bien 3 arguments et on await !
@@ -142,6 +148,7 @@ async fn rename(
     provider: &Arc<dyn RemoteProvider>,
     path_cache: &Arc<PathCache>,
     ignore: &IgnoreMatcher,
+    tracker: Arc<ProgressTracker>,
     shutdown: &CancellationToken,
 ) -> Result<()> {
     if ignore.is_ignored(from) && ignore.is_ignored(to) { return Ok(()); }
@@ -154,7 +161,7 @@ async fn rename(
 
     if from_entry.is_none() || !from_in_db {
         if to.is_file() && !ignore.is_ignored(to) {
-            return sync_file(to, cfg, db, provider, path_cache, ignore, shutdown).await;
+            return sync_file(to, cfg, db, provider, path_cache, ignore, tracker, shutdown).await;
         }
         return Ok(());
     }
@@ -240,7 +247,7 @@ mod tests {
     impl RemoteProvider for MockProvider {
         async fn list_remote(&self, _root: &str) -> Result<RemoteIndex> { Ok(RemoteIndex{files: vec![], dirs: vec![]}) }
         async fn mkdir(&self, _parent: &str, _name: &str) -> Result<String> { Ok("mock_dir".into()) }
-        async fn upload(&self, _local: &Path, _parent: &str, _name: &str, _exist: Option<&str>) -> Result<UploadResult> {
+        async fn upload(&self, _local: &Path, _parent: &str, _name: &str, _exist: Option<&str>,_tracker: Arc<ProgressTracker>) -> Result<UploadResult> {
             self.uploads.fetch_add(1, Ordering::Relaxed);
             Ok(UploadResult {
                 drive_id: "mock_file_id".into(),
@@ -266,7 +273,7 @@ mod tests {
     }
 
     // ─── HELPER DE TEST ───
-    async fn setup_test() -> (TempDir, AppConfig, Database, Arc<MockProvider>, Arc<PathCache>, IgnoreMatcher, CancellationToken) {
+    async fn setup_test() -> (TempDir, AppConfig, Database, Arc<MockProvider>, Arc<PathCache>, IgnoreMatcher, Arc<ProgressTracker>, CancellationToken) {
         let dir = TempDir::new().unwrap();
 
         let mut cfg = AppConfig::default();
@@ -295,23 +302,23 @@ mod tests {
         let provider = Arc::new(MockProvider::new());
         let path_cache = Arc::new(PathCache::new());
         let ignore = IgnoreMatcher::from_patterns(&[]).unwrap();
+        let tracker = Arc::new(crate::engine::bandwidth::ProgressTracker::new());
         let shutdown = CancellationToken::new();
-
-        (dir, cfg, db, provider, path_cache, ignore, shutdown)
+        (dir, cfg, db, provider, path_cache, ignore, tracker, shutdown)
     }
 
     // ─── LES TESTS DU WORKER ───
 
     #[tokio::test]
     async fn sync_file_uploads_and_inserts_db() {
-        let (dir, cfg, db, mock, cache, ignore, sd) = setup_test().await;
+        let (dir, cfg, db, mock, cache, ignore, tracker, sd) = setup_test().await;
         let provider: Arc<dyn RemoteProvider> = mock.clone();
 
         let file_path = dir.path().join("test.txt");
         tokio::fs::write(&file_path, "hello bella!").await.unwrap();
 
         let task = Task::SyncFile { path: file_path.clone() };
-        handle(task, &cfg, &db, &provider, &cache, &ignore, &sd).await.unwrap();
+        handle(task, &cfg, &db, &provider, &cache, &ignore, tracker, &sd).await.unwrap();
 
         // Vérifications
         assert_eq!(mock.uploads.load(Ordering::Relaxed), 1); // Upload a été appelé
@@ -321,7 +328,7 @@ mod tests {
 
     #[tokio::test]
     async fn sync_file_skips_unchanged() {
-        let (dir, cfg, db, mock, cache, ignore, sd) = setup_test().await;
+        let (dir, cfg, db, mock, cache, ignore, tracker, sd) = setup_test().await;
         let provider: Arc<dyn RemoteProvider> = mock.clone();
 
         let file_path = dir.path().join("unchanged.txt");
@@ -329,18 +336,18 @@ mod tests {
 
         // 1er passage : Ça upload
         let task1 = Task::SyncFile { path: file_path.clone() };
-        handle(task1, &cfg, &db, &provider, &cache, &ignore, &sd).await.unwrap();
+        handle(task1, &cfg, &db, &provider, &cache, &ignore, tracker.clone(), &sd).await.unwrap();
         assert_eq!(mock.uploads.load(Ordering::Relaxed), 1);
 
         // 2ème passage : Ça doit sauter (skip) car le fichier n'a pas changé
         let task2 = Task::SyncFile { path: file_path.clone() };
-        handle(task2, &cfg, &db, &provider, &cache, &ignore, &sd).await.unwrap();
+        handle(task2, &cfg, &db, &provider, &cache, &ignore, tracker, &sd).await.unwrap();
         assert_eq!(mock.uploads.load(Ordering::Relaxed), 1); // Le compteur reste à 1 !
     }
 
     #[tokio::test]
     async fn sync_file_skips_ignored() {
-        let (dir, cfg, db, mock, cache, _, sd) = setup_test().await;
+        let (dir, cfg, db, mock, cache, _, tracker, sd) = setup_test().await;
         let provider: Arc<dyn RemoteProvider> = mock.clone();
 
         // On configure une règle d'ignore
@@ -350,7 +357,7 @@ mod tests {
         tokio::fs::write(&file_path, "do not sync").await.unwrap();
 
         let task = Task::SyncFile { path: file_path.clone() };
-        handle(task, &cfg, &db, &provider, &cache, &ignore, &sd).await.unwrap();
+        handle(task, &cfg, &db, &provider, &cache, &ignore, tracker, &sd).await.unwrap();
 
         // L'upload ne doit pas avoir eu lieu
         assert_eq!(mock.uploads.load(Ordering::Relaxed), 0);
@@ -359,7 +366,7 @@ mod tests {
 
     #[tokio::test]
     async fn delete_removes_from_remote_and_db() {
-        let (dir, cfg, db, mock, cache, ignore, sd) = setup_test().await;
+        let (dir, cfg, db, mock, cache, ignore,tracker, sd) = setup_test().await;
         let provider: Arc<dyn RemoteProvider> = mock.clone();
 
         let file_path = dir.path().join("to_delete.txt");
@@ -369,7 +376,7 @@ mod tests {
         db.upsert(&FileEntry { path: "to_delete.txt".into(), hash: "xxx".into(), mtime: 123 }).unwrap();
 
         let task = Task::Delete(file_path);
-        handle(task, &cfg, &db, &provider, &cache, &ignore, &sd).await.unwrap();
+        handle(task, &cfg, &db, &provider, &cache, &ignore, tracker, &sd).await.unwrap();
 
         // L'appel API delete a été passé
         assert_eq!(mock.deletes.load(Ordering::Relaxed), 1);
@@ -380,7 +387,7 @@ mod tests {
 
     #[tokio::test]
     async fn rename_unknown_file_falls_back_to_sync() {
-        let (dir, cfg, db, mock, cache, ignore, sd) = setup_test().await;
+        let (dir, cfg, db, mock, cache, ignore, tracker, sd) = setup_test().await;
         let provider: Arc<dyn RemoteProvider> = mock.clone();
 
         let to_file = dir.path().join("final.txt");
@@ -391,7 +398,7 @@ mod tests {
             from: dir.path().join("final.txt.part"),
             to: to_file,
         };
-        handle(task, &cfg, &db, &provider, &cache, &ignore, &sd).await.unwrap();
+        handle(task, &cfg, &db, &provider, &cache, &ignore, tracker, &sd).await.unwrap();
 
         // Ça ne doit PAS faire un rename API, mais déclencher un upload (fallback)
         assert_eq!(mock.renames.load(Ordering::Relaxed), 0);
