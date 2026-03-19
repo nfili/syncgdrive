@@ -76,7 +76,6 @@ pub mod config;
 pub mod db;
 pub mod engine;
 pub mod ignore;
-pub mod kio;
 pub mod notif;
 pub mod migration;
 pub mod auth;

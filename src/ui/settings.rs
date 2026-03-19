@@ -564,7 +564,7 @@ fn is_remote_valid(text: &str) -> bool {
     if text.is_empty() {
         return false;
     }
-    const SUPPORTED: &[&str] = &["gdrive://", "gdrive:/", "smb://", "sftp://", "webdav://", "ftp://"];
+    static SUPPORTED: &[&str] = &["gdrive://", "gdrive:/", "smb://", "sftp://", "webdav://", "ftp://"];
     SUPPORTED.iter().any(|p| text.starts_with(p))
 }
 

@@ -32,7 +32,7 @@ fn default_health_check_secs() -> u64 { 30 }
 fn default_max_concurrent_ls() -> usize { 8 }
 fn default_shutdown_timeout() -> u64 { 3 }
 fn default_log_retention() -> u64 { 7 }
-fn default_channel_capacity() -> usize { 32 }
+fn default_channel_capacity() -> usize { 1024 }
 fn default_notif_timeout() -> i32 { 6000 }
 fn default_resumable_threshold() -> u64 { 5_242_880 }
 fn default_api_rate_limit() -> u32 { 10 }
@@ -403,5 +403,56 @@ mod tests {
         let cfg = AppConfig::default();
         assert_eq!(cfg.advanced.resumable_upload_threshold, 5_242_880);
         assert_eq!(cfg.advanced.delete_mode, "trash");
+    }
+
+    // ─── TESTS DE LA PHASE 4 : CONSTANTES ET LIMITES ───
+
+    #[test]
+    fn test_advanced_defaults_are_sane() {
+        let cfg = AppConfig::default();
+        // La configuration par défaut ne doit renvoyer aucune erreur
+        assert!(cfg.advanced.validate().is_ok(), "Les valeurs par défaut d'AdvancedConfig doivent être valides");
+    }
+
+    #[test]
+    fn test_advanced_zero_channel_rejected() {
+        let mut cfg = AppConfig::default();
+        cfg.advanced.engine_channel_capacity = 0;
+
+        let err = cfg.validate().unwrap_err();
+        assert!(
+            matches!(err, ConfigError::InvalidAdvanced(ref msg) if msg.contains("engine_channel_capacity")),
+            "Un channel capacity de 0 doit être rejeté"
+        );
+    }
+
+    #[test]
+    fn test_advanced_zero_concurrent_ls_rejected() {
+        let mut cfg = AppConfig::default();
+        cfg.advanced.max_concurrent_ls = 0;
+
+        let err = cfg.validate().unwrap_err();
+        assert!(
+            matches!(err, ConfigError::InvalidAdvanced(ref msg) if msg.contains("max_concurrent_ls")),
+            "Un max_concurrent_ls de 0 doit être rejeté"
+        );
+    }
+
+    #[test]
+    fn test_config_partial_advanced_merge() {
+        // On vérifie que si l'utilisateur ne modifie qu'une seule variable avancée,
+        // les autres gardent bien leurs valeurs par défaut.
+        let toml = r#"
+            notifications = false
+            [advanced]
+            debounce_ms = 150
+        "#;
+
+        let (cfg, _) = AppConfig::parse_and_migrate(toml).expect("Le TOML doit être valide");
+
+        // La valeur modifiée est bien prise en compte
+        assert_eq!(cfg.advanced.debounce_ms, 150);
+        // Les valeurs non spécifiées gardent les défauts (ex: 1024 pour le channel)
+        assert_eq!(cfg.advanced.engine_channel_capacity, 1024);
     }
 }

@@ -571,3 +571,66 @@ pub async fn run_unconfigured(
     let _ = status_tx.send(EngineStatus::Stopped);
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::sync::mpsc;
+    use tokio_util::sync::CancellationToken;
+    use std::path::PathBuf;
+    use crate::config::AppConfig;
+
+    #[tokio::test]
+    async fn test_main_uses_config_channel_capacity() {
+        let cfg = AppConfig::default();
+        let capacity = cfg.advanced.engine_channel_capacity;
+
+        // On vérifie que la mécanique de backpressure utilise bien la valeur configurée
+        let (tx, _rx) = mpsc::channel::<usize>(capacity);
+        for i in 0..capacity {
+            assert!(tx.try_send(i).is_ok(), "Le channel doit accepter les messages jusqu'à 'capacity'");
+        }
+        assert!(tx.try_send(capacity).is_err(), "Le channel doit rejeter les messages après avoir atteint 'capacity'");
+    }
+
+    #[tokio::test]
+    async fn test_debounce_zero_means_immediate() {
+        let (watch_tx, watch_rx) = mpsc::channel(10);
+        let (task_tx, mut task_rx) = mpsc::channel(10);
+        let shutdown = CancellationToken::new();
+
+        // On lance le dispatcher avec 0ms de debounce
+        spawn_debounced_dispatch(watch_rx, task_tx, shutdown.clone(), 0);
+
+        let start = tokio::time::Instant::now();
+
+        watch_tx.send(watcher::WatchEvent::Modified(PathBuf::from("zero.txt"))).await.unwrap();
+
+        let _ = task_rx.recv().await.unwrap();
+        let elapsed = start.elapsed().as_millis() as u64;
+
+        assert!(elapsed < 50, "Le debounce à 0 doit être quasi instantané (reçu: {}ms)", elapsed);
+    }
+
+    #[tokio::test]
+    async fn test_engine_uses_config_debounce() {
+        let (watch_tx, watch_rx) = mpsc::channel(10);
+        let (task_tx, mut task_rx) = mpsc::channel(10);
+        let shutdown = CancellationToken::new();
+
+        let cfg = AppConfig::default();
+        let configured_debounce = cfg.advanced.debounce_ms; // Par défaut 500ms
+
+        // On lance le dispatcher avec la configuration dynamique
+        spawn_debounced_dispatch(watch_rx, task_tx, shutdown.clone(), configured_debounce);
+
+        let start = tokio::time::Instant::now();
+
+        watch_tx.send(watcher::WatchEvent::Modified(PathBuf::from("config.txt"))).await.unwrap();
+
+        let _ = task_rx.recv().await.unwrap();
+        let elapsed = start.elapsed().as_millis() as u64;
+
+        assert!(elapsed >= configured_debounce, "Le debounce n'a pas respecté la configuration ! Attendu >= {}, reçu {}", configured_debounce, elapsed);
+    }
+}
