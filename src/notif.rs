@@ -48,7 +48,7 @@ pub fn initial_sync_complete(cfg: &AppConfig) {
         "Le dossier est à jour.\nSurveillance active, vous pouvez travailler en toute sécurité.",
         "emblem-ok-symbolic",
         Urgency::Normal,
-        6000,
+        cfg.advanced.notification_timeout_ms,
     );
 }
 

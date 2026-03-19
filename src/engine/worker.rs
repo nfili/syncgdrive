@@ -133,7 +133,7 @@ async fn delete(
 }
 
 // ── Renommage ─────────────────────────────────────────────────────────────────
-
+#[allow(clippy::too_many_arguments)]
 async fn rename(
     from: &Path,
     to: &Path,
@@ -238,10 +238,8 @@ mod tests {
 
     #[async_trait]
     impl RemoteProvider for MockProvider {
-        async fn check_health(&self) -> Result<HealthStatus> { Ok(HealthStatus::Unreachable) }
         async fn list_remote(&self, _root: &str) -> Result<RemoteIndex> { Ok(RemoteIndex{files: vec![], dirs: vec![]}) }
         async fn mkdir(&self, _parent: &str, _name: &str) -> Result<String> { Ok("mock_dir".into()) }
-
         async fn upload(&self, _local: &Path, _parent: &str, _name: &str, _exist: Option<&str>) -> Result<UploadResult> {
             self.uploads.fetch_add(1, Ordering::Relaxed);
             Ok(UploadResult {
@@ -262,10 +260,11 @@ mod tests {
         }
 
         async fn get_changes(&self, _cursor: Option<&str>) -> Result<ChangesPage> { Ok(ChangesPage{changes: vec![], new_cursor: "".into(), has_more: false}) }
+
+        async fn check_health(&self) -> Result<HealthStatus> { Ok(HealthStatus::Unreachable) }
         async fn shutdown(&self) {}
     }
 
-    // ─── HELPER DE TEST ───
     // ─── HELPER DE TEST ───
     async fn setup_test() -> (TempDir, AppConfig, Database, Arc<MockProvider>, Arc<PathCache>, IgnoreMatcher, CancellationToken) {
         let dir = TempDir::new().unwrap();

@@ -15,6 +15,7 @@ use crate::ignore::IgnoreMatcher;
 use crate::notif;
 use crate::remote::{RemoteProvider, path_cache::PathCache};
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn run(
     cfg: &AppConfig,
     db: &Database,
@@ -82,7 +83,7 @@ pub(crate) async fn run(
         }
 
         local_count += 1;
-        if local_count % 100 == 0 {
+        if local_count.is_multiple_of(100) {
             let _ = status_tx.send(EngineStatus::ScanProgress {
                 phase: ScanPhase::LocalListing,
                 done: local_count,
@@ -119,7 +120,7 @@ pub(crate) async fn run(
             current: dir_name,
         });
 
-        if i % 10 == 0 || i + 1 == total_dirs {
+        if i.is_multiple_of(10) || i + 1 == total_dirs {
             notif::scan_dirs_progress(cfg, i + 1, total_dirs);
         }
 
@@ -192,7 +193,7 @@ pub(crate) async fn run(
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_default();
 
-        if i % 50 == 0 || i + 1 == total_files {
+        if i.is_multiple_of(50) || i + 1 == total_files {
             let _ = status_tx.send(EngineStatus::ScanProgress {
                 phase: ScanPhase::Comparing,
                 done: i + 1,

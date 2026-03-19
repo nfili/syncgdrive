@@ -122,6 +122,20 @@ impl Default for AdvancedConfig {
         }
     }
 }
+impl AdvancedConfig {
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.engine_channel_capacity == 0 {
+            return Err(ConfigError::InvalidAdvanced("engine_channel_capacity doit être > 0".into()));
+        }
+        if self.max_concurrent_ls == 0 {
+            return Err(ConfigError::InvalidAdvanced("max_concurrent_ls doit être > 0".into()));
+        }
+        if self.api_rate_limit_rps == 0 {
+            return Err(ConfigError::InvalidAdvanced("api_rate_limit_rps doit être > 0".into()));
+        }
+        Ok(())
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyncPair {
@@ -167,6 +181,8 @@ pub enum ConfigError {
     PairLocalEmpty(usize),
     #[error("la paire #{0} a un chemin local '{1}' qui n'existe pas ou n'est pas un répertoire")]
     PairLocalMissing(usize, PathBuf),
+    #[error("configuration avancée invalide: {0}")]
+    InvalidAdvanced(String),
 }
 
 // ── Chemin de la config ───────────────────────────────────────────────────────
@@ -270,6 +286,8 @@ impl AppConfig {
     }
 
     pub fn validate(&self) -> Result<(), ConfigError> {
+        self.advanced.validate()?;
+
         if self.sync_pairs.is_empty() {
             return Err(ConfigError::NoPairsConfigured);
         }

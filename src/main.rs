@@ -20,7 +20,6 @@ async fn main() -> Result<()> {
 
     // ── Initialisation des Logs (doit se faire très tôt) ──────────────────
     let log_dir = log_dir();
-    cleanup_old_logs(&log_dir, 7);
     let _log_guard = init_logging(&log_dir)?;
 
     // ── Auto-détection de la session ──────────────────
@@ -60,10 +59,12 @@ async fn main() -> Result<()> {
         );
     }
 
+    cleanup_old_logs(&log_dir, 7);
+
     // La base de données a déjà été migrée par `run_all_migrations`, on l'ouvre simplement
     let db = Database::open(db_path_buf).context("cannot open db")?;
 
-    let (cmd_tx, cmd_rx) = mpsc::channel::<EngineCommand>(32);
+    let (cmd_tx, cmd_rx) = mpsc::channel::<EngineCommand>(cfg.advanced.engine_channel_capacity);
     let (status_tx, status_rx) = mpsc::unbounded_channel::<EngineStatus>();
     let shutdown = CancellationToken::new();
 
@@ -112,7 +113,7 @@ async fn main() -> Result<()> {
     }
     #[cfg(not(feature = "ui"))]
     {
-        let _ = (cfg, log_dir, is_first_run);
+        let _ = (cfg.clone(), log_dir, is_first_run);
         tokio::spawn(async move {
             let mut status_rx = status_rx;
             while (status_rx.recv().await).is_some() {}
@@ -135,8 +136,8 @@ async fn main() -> Result<()> {
 
     tokio::select! {
         _ = engine => { info!("moteur arrêté proprement"); }
-        _ = tokio::time::sleep(std::time::Duration::from_secs(3)) => {
-            warn!("timeout 3s dépassé — sortie forcée");
+        _ = tokio::time::sleep(std::time::Duration::from_secs(cfg.advanced.shutdown_timeout_secs)) => {
+            warn!("timeout {}s dépassé — sortie forcée",cfg.advanced.shutdown_timeout_secs);
         }
     }
 

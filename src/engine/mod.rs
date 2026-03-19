@@ -174,7 +174,7 @@ impl SyncEngine {
 
         let task_tx_w = task_tx.clone();
         let sd_w = shutdown.clone();
-        spawn_debounced_dispatch(watch_rx, task_tx_w, sd_w);
+        spawn_debounced_dispatch(watch_rx, task_tx_w, sd_w,self.cfg.advanced.debounce_ms);
 
         let sem = Arc::new(Semaphore::new(self.cfg.max_workers.max(1)));
         let active = Arc::new(AtomicUsize::new(0));
@@ -182,8 +182,8 @@ impl SyncEngine {
         let total_done = Arc::new(AtomicUsize::new(0));
 
         let mut overflow_tick = tokio::time::interval_at(
-            tokio::time::Instant::now() + std::time::Duration::from_secs(30),
-            std::time::Duration::from_secs(30),
+            tokio::time::Instant::now() + std::time::Duration::from_secs(self.cfg.advanced.health_check_interval_secs),
+            std::time::Duration::from_secs(self.cfg.advanced.health_check_interval_secs),
         );
 
         let rescan_secs = self.cfg.rescan_interval_min.saturating_mul(60);
@@ -241,7 +241,7 @@ impl SyncEngine {
                                     db.clear_dirs()?;
                                     let (tx2, rx2) = mpsc::channel(256);
                                     watcher = watcher::Watcher::start(&self.cfg.sync_pairs[0].local_path, tx2)?;
-                                    spawn_debounced_dispatch(rx2, task_tx.clone(), shutdown.clone());
+                                    spawn_debounced_dispatch(rx2, task_tx.clone(), shutdown.clone(),self.cfg.advanced.debounce_ms);
                                 }
                             }
                             _ => {}
@@ -296,7 +296,7 @@ impl SyncEngine {
                                 db.clear_dirs()?;
                                 let (tx2, rx2) = mpsc::channel(256);
                                 watcher = watcher::Watcher::start(&self.cfg.sync_pairs[0].local_path, tx2)?;
-                                spawn_debounced_dispatch(rx2, task_tx.clone(), shutdown.clone());
+                                spawn_debounced_dispatch(rx2, task_tx.clone(), shutdown.clone(),self.cfg.advanced.debounce_ms);
                                 let ignore3 = IgnoreMatcher::from_patterns(&self.cfg.ignore_patterns)?;
                                 total_queued.store(0, Ordering::Relaxed);
                                 total_done.store(0, Ordering::Relaxed);
@@ -480,12 +480,11 @@ fn spawn_debounced_dispatch(
     mut watch_rx: mpsc::Receiver<watcher::WatchEvent>,
     task_tx: mpsc::Sender<Task>,
     shutdown: CancellationToken,
+    debounce_ms: u64,
 ) {
     use std::collections::HashMap;
     use tokio::time::{Duration, Instant, interval};
     use watcher::WatchEvent;
-
-    const DEBOUNCE_MS: u64 = 500;
 
     tokio::spawn(async move {
         let mut pending: HashMap<PathBuf, Instant> = HashMap::new();
@@ -498,7 +497,7 @@ fn spawn_debounced_dispatch(
                 _ = shutdown.cancelled() => break,
                 _ = tick.tick() => {
                     let now = Instant::now();
-                    let debounce = Duration::from_millis(DEBOUNCE_MS);
+                    let debounce = Duration::from_millis(debounce_ms);
                     let ready: Vec<PathBuf> = pending.iter()
                         .filter(|(_, ts)| now.duration_since(**ts) >= debounce)
                         .map(|(p, _)| p.clone())

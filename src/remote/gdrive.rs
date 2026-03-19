@@ -43,7 +43,7 @@ impl GDriveProvider {
             .timeout(std::time::Duration::from_secs(30)) // Sécurité : 30s max par requête
             .connect_timeout(std::time::Duration::from_secs(5)) // Échec rapide si le serveur (mock) ne répond pa
             .pool_idle_timeout(std::time::Duration::from_secs(90))
-            .pool_max_idle_per_host(32)
+            .pool_max_idle_per_host(config.max_concurrent_ls)
             .build()
             .context("Erreur d'initialisation du client HTTP reqwest")?;
 
