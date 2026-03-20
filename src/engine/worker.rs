@@ -34,7 +34,7 @@ pub(crate) async fn handle(
 }
 
 // ── Sync fichier ──────────────────────────────────────────────────────────────
-
+#[allow(clippy::too_many_arguments)]
 async fn sync_file(
     path: &Path,
     cfg: &AppConfig,
@@ -98,15 +98,12 @@ async fn sync_file(
         }
     };
 
-    tracing::error!("🚨 RADAR 14 : Parent ID trouvé : {}", parent_id);
-
     let existing_entry = path_cache.lookup(&rel).await;
     let existing_id = existing_entry.as_ref().map(|e| e.drive_id.as_str());
 
     // Upload !
     let parent_dir = path.parent().unwrap_or_else(|| Path::new("")).to_string_lossy().to_string();
     tracker.set_current_file(parent_dir, file_name.clone(), file_size);
-    tracing::info!("🚀 Préparation de l'upload pour : {:?}", path);
 
     let res = retry(cfg, shutdown, "upload", || async {
         provider.upload(path, &parent_id, &file_name, existing_id, tracker.clone()).await

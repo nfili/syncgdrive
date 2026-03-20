@@ -14,6 +14,7 @@ use tracing::{error, info, warn};
 
 use crate::config::AppConfig;
 use crate::db::Database;
+use crate::engine::bandwidth::ProgressTracker;
 use crate::ignore::IgnoreMatcher;
 use crate::remote::{RemoteProvider, path_cache::PathCache};
 
@@ -112,10 +113,10 @@ impl SyncEngine {
 
         let mut paused = false;
         let mut rescan_on_resume = false;
-
+        let tracker = Arc::new(crate::engine::bandwidth::ProgressTracker::new());
         {
             let _ = status_tx.send(EngineStatus::Syncing { active: 0 });
-            let scan = scan::run(&self.cfg, &db, &ignore, &provider, &path_cache, &task_tx, &shutdown, &status_tx);
+            let scan = scan::run(&self.cfg, &db, &ignore, &provider, &path_cache, &task_tx, &shutdown, &status_tx,&tracker);
             tokio::pin!(scan);
 
             loop {
@@ -170,12 +171,11 @@ impl SyncEngine {
 
         let task_tx_w = task_tx.clone();
         let sd_w = shutdown.clone();
-        spawn_debounced_dispatch(watch_rx, task_tx_w, sd_w,self.cfg.advanced.debounce_ms);
+        spawn_debounced_dispatch(watch_rx, task_tx_w, sd_w,self.cfg.advanced.debounce_ms, tracker.clone());
 
         let sem = Arc::new(Semaphore::new(self.cfg.max_workers.max(1)));
         let active = Arc::new(AtomicUsize::new(0));
 
-        let tracker = Arc::new(crate::engine::bandwidth::ProgressTracker::new());
         tokio::spawn(progress_publisher(tracker.clone(), status_tx.clone(), shutdown.clone()));
 
         let mut overflow_tick = tokio::time::interval_at(
@@ -213,7 +213,7 @@ impl SyncEngine {
                                     let _ = status_tx.send(EngineStatus::Syncing { active: 0 });
                                     let ig = IgnoreMatcher::from_patterns(&self.cfg.ignore_patterns)?;
                                     tokio::select! {
-                                        r = scan::run(&self.cfg, &db, &ig, &provider, &path_cache, &task_tx, &shutdown, &status_tx) => {
+                                        r = scan::run(&self.cfg, &db, &ig, &provider, &path_cache, &task_tx, &shutdown, &status_tx, & tracker) => {
                                             if let Err(e) = r {
                                                 if is_shutdown_err(&e) { shutdown.cancel(); break; }
                                                 let _ = status_tx.send(EngineStatus::Error(e.to_string()));
@@ -243,7 +243,7 @@ impl SyncEngine {
                                     db.clear_dirs()?;
                                     let (tx2, rx2) = mpsc::channel(256);
                                     watcher = watcher::Watcher::start(&self.cfg.sync_pairs[0].local_path, tx2)?;
-                                    spawn_debounced_dispatch(rx2, task_tx.clone(), shutdown.clone(),self.cfg.advanced.debounce_ms);
+                                    spawn_debounced_dispatch(rx2, task_tx.clone(), shutdown.clone(),self.cfg.advanced.debounce_ms,tracker.clone());
                                 }
                             }
                             _ => {}
@@ -280,7 +280,7 @@ impl SyncEngine {
                             let _ = status_tx.send(EngineStatus::Syncing { active: 0 });
                             let ignore2 = IgnoreMatcher::from_patterns(&self.cfg.ignore_patterns)?;
                             tokio::select! {
-                                r = scan::run(&self.cfg, &db, &ignore2, &provider, &path_cache, &task_tx, &shutdown, &status_tx) => {
+                                r = scan::run(&self.cfg, &db, &ignore2, &provider, &path_cache, &task_tx, &shutdown, &status_tx,&tracker) => {
                                     if let Err(e) = r {
                                         if is_shutdown_err(&e) { shutdown.cancel(); break; }
                                         let _ = status_tx.send(EngineStatus::Error(e.to_string()));
@@ -303,7 +303,7 @@ impl SyncEngine {
                                 db.clear_dirs()?;
                                 let (tx2, rx2) = mpsc::channel(256);
                                 watcher = watcher::Watcher::start(&self.cfg.sync_pairs[0].local_path, tx2)?;
-                                spawn_debounced_dispatch(rx2, task_tx.clone(), shutdown.clone(),self.cfg.advanced.debounce_ms);
+                                spawn_debounced_dispatch(rx2, task_tx.clone(), shutdown.clone(),self.cfg.advanced.debounce_ms,tracker.clone());
                                 let ignore3 = IgnoreMatcher::from_patterns(&self.cfg.ignore_patterns)?;
                                 tracker.total_files.store(0, Ordering::Relaxed);
                                 tracker.done_files.store(0, Ordering::Relaxed);
@@ -311,7 +311,7 @@ impl SyncEngine {
                                 tracker.sent_bytes.store(0, Ordering::Relaxed);
                                 let _ = status_tx.send(EngineStatus::Syncing { active: 0 });
                                 tokio::select! {
-                                    r = scan::run(&self.cfg, &db, &ignore3, &provider, &path_cache, &task_tx, &shutdown, &status_tx) => {
+                                    r = scan::run(&self.cfg, &db, &ignore3, &provider, &path_cache, &task_tx, &shutdown, &status_tx,&tracker) => {
                                         if let Err(e) = r {
                                             if is_shutdown_err(&e) { shutdown.cancel(); break; }
                                             let _ = status_tx.send(EngineStatus::Error(e.to_string()));
@@ -350,7 +350,7 @@ impl SyncEngine {
                         let _ = status_tx.send(EngineStatus::Syncing { active: 0 });
                         let ignore_o = IgnoreMatcher::from_patterns(&self.cfg.ignore_patterns)?;
                         tokio::select! {
-                            r = scan::run(&self.cfg, &db, &ignore_o, &provider, &path_cache, &task_tx, &shutdown, &status_tx) => {
+                            r = scan::run(&self.cfg, &db, &ignore_o, &provider, &path_cache, &task_tx, &shutdown, &status_tx, &tracker) => {
                                 if let Err(e) = r {
                                     if is_shutdown_err(&e) { shutdown.cancel(); break; }
                                     let _ = status_tx.send(EngineStatus::Error(e.to_string()));
@@ -374,7 +374,7 @@ impl SyncEngine {
                     let _ = status_tx.send(EngineStatus::Syncing { active: 0 });
                     let ignore_r = IgnoreMatcher::from_patterns(&self.cfg.ignore_patterns)?;
                     tokio::select! {
-                        r = scan::run(&self.cfg, &db, &ignore_r, &provider, &path_cache, &task_tx, &shutdown, &status_tx) => {
+                        r = scan::run(&self.cfg, &db, &ignore_r, &provider, &path_cache, &task_tx, &shutdown, &status_tx, &tracker) => {
                             if let Err(e) = r {
                                 if is_shutdown_err(&e) { shutdown.cancel(); break; }
                                 let _ = status_tx.send(EngineStatus::Error(e.to_string()));
@@ -391,23 +391,20 @@ impl SyncEngine {
                 maybe_task = task_rx.recv() => {
                     let Some(task) = maybe_task else { break; };
 
-                    let (_file_name, file_size) = match &task {
-                        Task::SyncFile { ref path } => (
-                            path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
-                            std::fs::metadata(path).map(|m| m.len()).unwrap_or(0),
-                        ),
-                        Task::Delete(p) => (
-                            p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
-                            0u64,
-                        ),
-                        Task::Rename { to, .. } => (
-                            to.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
-                            0u64,
-                        ),
-                    };
-
-                    tracker.total_files.fetch_add(1, Ordering::Relaxed);
-                    tracker.total_bytes.fetch_add(file_size, Ordering::Relaxed);
+                    // let (_file_name, file_size) = match &task {
+                    //     Task::SyncFile { ref path } => (
+                    //         path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
+                    //         std::fs::metadata(path).map(|m| m.len()).unwrap_or(0),
+                    //     ),
+                    //     Task::Delete(p) => (
+                    //         p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
+                    //         0u64,
+                    //     ),
+                    //     Task::Rename { to, .. } => (
+                    //         to.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
+                    //         0u64,
+                    //     ),
+                    // };
 
                     let permit = tokio::select! {
                         p = sem.clone().acquire_owned() => p.context("semaphore closed")?,
@@ -488,6 +485,7 @@ fn spawn_debounced_dispatch(
     task_tx: mpsc::Sender<Task>,
     shutdown: CancellationToken,
     debounce_ms: u64,
+    tracker: Arc<ProgressTracker>,
 ) {
     use std::collections::HashMap;
     use tokio::time::{Duration, Instant, interval};
@@ -511,6 +509,9 @@ fn spawn_debounced_dispatch(
                         .collect();
                     for path in ready {
                         pending.remove(&path);
+                        let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+                        tracker.total_files.fetch_add(1, Ordering::Relaxed);
+                        tracker.total_bytes.fetch_add(size, Ordering::Relaxed);
                         let task = Task::SyncFile { path };
                         if task_tx.send(task).await.is_err() { return; }
                     }
@@ -526,12 +527,14 @@ fn spawn_debounced_dispatch(
                         }
                         WatchEvent::Deleted(p) => {
                             pending.remove(&p);
+                            tracker.total_files.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             let task = Task::Delete(p);
                             if task_tx.send(task).await.is_err() { return; }
                         }
                         WatchEvent::Renamed { from, to } => {
                             pending.remove(&from);
                             pending.remove(&to);
+                            tracker.total_files.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             let task = Task::Rename { from, to };
                             if task_tx.send(task).await.is_err() { return; }
                         }
@@ -628,9 +631,10 @@ mod tests {
         let (watch_tx, watch_rx) = mpsc::channel(10);
         let (task_tx, mut task_rx) = mpsc::channel(10);
         let shutdown = CancellationToken::new();
+        let tracker = Arc::new(crate::engine::bandwidth::ProgressTracker::new());
 
         // On lance le dispatcher avec 0ms de debounce
-        spawn_debounced_dispatch(watch_rx, task_tx, shutdown.clone(), 0);
+        spawn_debounced_dispatch(watch_rx, task_tx, shutdown.clone(), 0,tracker);
 
         let start = tokio::time::Instant::now();
 
@@ -650,9 +654,10 @@ mod tests {
 
         let cfg = AppConfig::default();
         let configured_debounce = cfg.advanced.debounce_ms; // Par défaut 500ms
+        let tracker = Arc::new(crate::engine::bandwidth::ProgressTracker::new());
 
         // On lance le dispatcher avec la configuration dynamique
-        spawn_debounced_dispatch(watch_rx, task_tx, shutdown.clone(), configured_debounce);
+        spawn_debounced_dispatch(watch_rx, task_tx, shutdown.clone(), configured_debounce,tracker);
 
         let start = tokio::time::Instant::now();
 

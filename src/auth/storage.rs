@@ -119,8 +119,12 @@ mod tests {
     use crate::auth::oauth2::GoogleTokens;
     use std::env;
     use std::fs;
+    use std::sync::Mutex;
 
-    // Helper pour isoler les tests dans un dossier temporaire
+    // Mutex global pour forcer l'exécution séquentielle de ces tests
+    // car ils modifient des variables d'environnement globales.
+    static ENV_MUTEX: Mutex<()> = Mutex::new(());
+
     // Helper pour isoler les tests dans un dossier temporaire
     fn setup_test_env(test_name: &str) -> String {
         let temp_dir = env::temp_dir().join(format!("syncgdrive_test_{}", test_name));
@@ -148,6 +152,8 @@ mod tests {
 
     #[test]
     fn test_file_storage_roundtrip() {
+        let _lock = ENV_MUTEX.lock().unwrap(); // <-- On verrouille !
+
         setup_test_env("roundtrip");
         let storage = EncryptedFileStorage::new().expect("Init storage");
         let tokens = dummy_tokens();
@@ -165,6 +171,8 @@ mod tests {
 
     #[test]
     fn test_file_storage_clear() {
+        let _lock = ENV_MUTEX.lock().unwrap(); // <-- On verrouille !
+
         setup_test_env("clear");
         let storage = EncryptedFileStorage::new().unwrap();
 
@@ -177,10 +185,12 @@ mod tests {
 
     #[test]
     fn test_file_storage_corruption() {
+        let _lock = ENV_MUTEX.lock().unwrap(); // <-- On verrouille !
+
         let dir = setup_test_env("corruption");
         let storage = EncryptedFileStorage::new().unwrap();
 
-        // On écrit volontairement un fichier poubelle de 15 octets (pour passer la vérification de taille du Nonce mais faire planter le déchiffrement AES)
+        // On écrit volontairement un fichier poubelle de 15 octets
         let bad_data = vec![0u8; 15];
         fs::write(format!("{}/syncgdrive/tokens.enc", dir), bad_data).unwrap();
 

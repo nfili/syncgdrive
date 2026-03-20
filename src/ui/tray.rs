@@ -241,20 +241,51 @@ impl ksni::Tray for SyncTray {
             }
             // §7A : "Envoi en cours : 80% [████████░░]\nFichier : rapport.pdf\nPoids : 4.2 Mo (8 / 10 fichiers)"
             EngineStatus::SyncProgress(snap) => {
-                let file_pct = if snap.current_file_size > 0 { (snap.current_bytes_sent as f64 / snap.current_file_size as f64) * 100.0 } else { 0.0 };
-                let global_pct = if snap.total_bytes > 0 { (snap.sent_bytes as f64 / snap.total_bytes as f64) * 100.0 } else { 0.0 };
-                let bar = progress_bar(global_pct, 10);
-                let size = human_size(snap.current_file_size);
+                // Pourcentage global capé à 100%
+                let global_pct = if snap.total_bytes > 0 {
+                    ((snap.sent_bytes as f64 / snap.total_bytes as f64) * 100.0).clamp(0.0, 100.0)
+                } else { 0.0 };
+
+                // Barre ajustée pour correspondre à ton image
+                let bar = progress_bar(global_pct, 20);
+                let f_size = human_size(snap.current_file_size);
                 let speed = human_size(snap.speed_bps);
+                let total_sent = human_size(snap.sent_bytes);
+                let total_all = human_size(snap.total_bytes);
+
+                let raw_dir = snap.current_dir.trim_matches('/');
+                let display_dir = if raw_dir.is_empty() {
+                    "/".to_string()
+                } else {
+                    let parts: Vec<&str> = raw_dir.split('/').collect();
+                    if parts.len() > 3 {
+                        // Exemple : "Projets/…/dossier_final/"
+                        format!("{}/…/{}/", parts[0], parts.last().unwrap())
+                    } else if raw_dir.len() > 35 {
+                        // Si on a peu de dossiers mais des noms à rallonge, on coupe la chaîne
+                        let start = &raw_dir[..15];
+                        let end = &raw_dir[raw_dir.len() - 15..];
+                        format!("{}…{}/", start, end)
+                    } else {
+                        format!("{}/", raw_dir)
+                    }
+                };
+
+                let current_idx = (snap.done_files + 1).min(snap.total_files);
 
                 (
-                    format!("SyncGDrive — Transfert {}/{}", snap.done_files, snap.total_files),
+                    format!("Transfert {}/{}", current_idx, snap.total_files),
                     format!(
-                        "Fichier : {} ({file_pct:.0}%)\nPoids : {size}\n[Global] {global_pct:.0}% {bar}\nVitesse : {speed}/s\n{}\nOctets : {} / {}",
+                        "📂 {}\n📄 {} ({})\n{} {:.0}% · {}/s · {}\nTotal : {} / {}",
+                        display_dir,
                         snap.current_name,
-                        snap.eta_string, // <-- NOUVEAU
-                        human_size(snap.sent_bytes),
-                        human_size(snap.total_bytes)
+                        f_size,
+                        bar,
+                        global_pct,
+                        speed,
+                        snap.eta_string,
+                        total_sent,
+                        total_all
                     ),
                 )
             }

@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-
+use std::sync::atomic::Ordering;
 use anyhow::{Context, Result};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -11,6 +11,7 @@ use walkdir::WalkDir;
 use crate::config::AppConfig;
 use crate::db::{Database, FileEntry};
 use crate::engine::{EngineStatus, ScanPhase, Task};
+use crate::engine::bandwidth::ProgressTracker;
 use crate::ignore::IgnoreMatcher;
 use crate::notif;
 use crate::remote::{RemoteProvider, path_cache::PathCache};
@@ -25,6 +26,7 @@ pub(crate) async fn run(
     task_tx: &mpsc::Sender<Task>,
     shutdown: &CancellationToken,
     status_tx: &mpsc::UnboundedSender<EngineStatus>,
+    tracker: &Arc<ProgressTracker>,
 ) -> Result<()> {
     info!(root = %cfg.sync_pairs[0].local_path.display(), "scan: start");
     notif::scan_started(cfg);
@@ -240,6 +242,15 @@ pub(crate) async fn run(
     info!(to_sync = to_sync.len(), skipped, skipped_remote, "scan: comparaison terminée");
     notif::scan_complete(cfg, total_dirs, to_sync.len(), skipped + skipped_remote);
 
+    // NOUVEAU : Calcul du poids total AVANT l'envoi en queue
+    let total_to_sync_bytes: u64 = to_sync.iter()
+        .map(|p| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0))
+        .sum();
+
+    // On initialise le tracker avec les vraies valeurs finales
+    tracker.total_files.store(to_sync.len(), Ordering::Relaxed);
+    tracker.total_bytes.store(total_to_sync_bytes, Ordering::Relaxed);
+
     // ── Phase 4 : enqueue les fichiers à synchroniser ─────────────────────────
     let sync_total = to_sync.len();
     for (i, path) in to_sync.into_iter().enumerate() {
@@ -286,6 +297,7 @@ pub(crate) async fn run(
             }
             if !local_rel_set.contains(db_path) {
                 let full_local = cfg.sync_pairs[0].local_path.join(db_path);
+                tracker.total_files.fetch_add(1, Ordering::Relaxed);
                 if task_tx.send(Task::Delete(full_local)).await.is_err() {
                     anyhow::bail!("shutdown: task queue closed");
                 }
@@ -314,6 +326,7 @@ pub(crate) async fn run(
             if db_index.contains(rel) { continue; }
             if ignore.is_ignored(&local_path) { continue; }
 
+            tracker.total_files.fetch_add(1, Ordering::Relaxed);
             if task_tx.send(Task::Delete(local_path)).await.is_err() {
                 anyhow::bail!("shutdown: task queue closed");
             }
