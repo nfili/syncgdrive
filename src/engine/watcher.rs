@@ -1,10 +1,12 @@
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher as NotifyWatcher,
-             event::{ModifyKind, RenameMode}};
+use notify::{
+    event::{ModifyKind, RenameMode},
+    Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher as NotifyWatcher,
+};
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
@@ -29,27 +31,24 @@ impl Watcher {
         let root = root.to_path_buf();
         let mut watcher = notify::recommended_watcher(move |res: notify::Result<Event>| {
             let event = match res {
-                Ok(e)  => e,
-                Err(e) => { warn!(error = %e, "inotify error"); return; }
+                Ok(e) => e,
+                Err(e) => {
+                    warn!(error = %e, "inotify error");
+                    return;
+                }
             };
 
             let ev = match event.kind {
                 // Fichier fermé après écriture — le plus fiable pour déclencher la sync.
                 EventKind::Access(notify::event::AccessKind::Close(
-                    notify::event::AccessMode::Write
-                )) => {
-                    event.paths.into_iter().next().map(WatchEvent::Modified)
-                }
+                    notify::event::AccessMode::Write,
+                )) => event.paths.into_iter().next().map(WatchEvent::Modified),
 
                 // Création de fichier
-                EventKind::Create(_) => {
-                    event.paths.into_iter().next().map(WatchEvent::Modified)
-                }
+                EventKind::Create(_) => event.paths.into_iter().next().map(WatchEvent::Modified),
 
                 // Suppression
-                EventKind::Remove(_) => {
-                    event.paths.into_iter().next().map(WatchEvent::Deleted)
-                }
+                EventKind::Remove(_) => event.paths.into_iter().next().map(WatchEvent::Deleted),
 
                 // Renommage atomique (both = from+to dans le même event)
                 EventKind::Modify(ModifyKind::Name(RenameMode::Both)) => {
@@ -102,7 +101,10 @@ impl Watcher {
             .watch(&root, RecursiveMode::Recursive)
             .with_context(|| format!("cannot watch {}", root.display()))?;
 
-        Ok(Self { _watcher: watcher, overflow })
+        Ok(Self {
+            _watcher: watcher,
+            overflow,
+        })
     }
 
     /// Retourne `true` si des événements ont été perdus (channel plein)
@@ -116,4 +118,3 @@ impl Watcher {
         drop(self._watcher);
     }
 }
-

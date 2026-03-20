@@ -1,9 +1,9 @@
-use std::sync::Arc;
 use anyhow::{Context, Result};
+use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
-use std::sync::atomic::{AtomicI32, Ordering};
 
 use sync_g_drive::db::Database;
 use sync_g_drive::engine::{EngineCommand, EngineStatus, SyncEngine};
@@ -79,7 +79,7 @@ async fn main() -> Result<()> {
         }
         SIGNAL_PIPE_WRITE.store(fds[1], Ordering::SeqCst);
         unsafe {
-            libc::signal(libc::SIGINT,  signal_handler as *const () as usize);
+            libc::signal(libc::SIGINT, signal_handler as *const () as usize);
             libc::signal(libc::SIGTERM, signal_handler as *const () as usize);
         }
         fds[0]
@@ -90,12 +90,18 @@ async fn main() -> Result<()> {
         let reason = cfg.validate().unwrap_err().to_string();
         let _ = status_tx.send(EngineStatus::Unconfigured(reason));
         tokio::spawn(sync_g_drive::engine::run_unconfigured(
-            db, shutdown.clone(), cmd_rx, status_tx,
+            db,
+            shutdown.clone(),
+            cmd_rx,
+            status_tx,
         ))
     } else {
         // Le SyncEngine prend maintenant la config complète
         tokio::spawn(SyncEngine::new(Arc::from(cfg.clone())).run(
-            db, shutdown.clone(), cmd_rx, status_tx,
+            db,
+            shutdown.clone(),
+            cmd_rx,
+            status_tx,
         ))
     };
 
@@ -122,8 +128,7 @@ async fn main() -> Result<()> {
     }
 
     // ── Attente shutdown ──────────────────────────────────────────────────────
-    let async_fd = tokio::io::unix::AsyncFd::new(signal_fd)
-        .context("AsyncFd on signal pipe")?;
+    let async_fd = tokio::io::unix::AsyncFd::new(signal_fd).context("AsyncFd on signal pipe")?;
     tokio::select! {
         _ = async_fd.readable() => {
             info!("signal reçu, arrêt…");
@@ -131,7 +136,9 @@ async fn main() -> Result<()> {
         }
         _ = shutdown.cancelled() => {}
     }
-    unsafe { libc::close(signal_fd); }
+    unsafe {
+        libc::close(signal_fd);
+    }
 
     let _ = cmd_tx.send(EngineCommand::Shutdown).await;
 
@@ -152,7 +159,9 @@ static SIGNAL_PIPE_WRITE: AtomicI32 = AtomicI32::new(-1);
 extern "C" fn signal_handler(_sig: libc::c_int) {
     let fd = SIGNAL_PIPE_WRITE.load(Ordering::SeqCst);
     if fd >= 0 {
-        unsafe { libc::write(fd, c"".as_ptr() as *const libc::c_void, 1); }
+        unsafe {
+            libc::write(fd, c"".as_ptr() as *const libc::c_void, 1);
+        }
     }
 }
 
@@ -183,7 +192,9 @@ fn acquire_instance_lock() -> std::fs::File {
                 .icon("dialog-information")
                 .timeout(4000)
                 .show();
-        }).join().unwrap();
+        })
+        .join()
+        .unwrap();
 
         std::process::exit(0);
     }
@@ -204,21 +215,25 @@ fn db_path() -> String {
 }
 
 fn log_dir() -> std::path::PathBuf {
-    let dir = xdg_dir("XDG_STATE_HOME", ".local/state").join("syncgdrive").join("logs");
+    let dir = xdg_dir("XDG_STATE_HOME", ".local/state")
+        .join("syncgdrive")
+        .join("logs");
     std::fs::create_dir_all(&dir).ok();
     dir
 }
 
 fn xdg_dir(env: &str, fallback: &str) -> std::path::PathBuf {
-    std::env::var(env).map(std::path::PathBuf::from).unwrap_or_else(|_| {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-        std::path::PathBuf::from(home).join(fallback)
-    })
+    std::env::var(env)
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+            std::path::PathBuf::from(home).join(fallback)
+        })
 }
 
 fn cleanup_old_logs(log_dir: &std::path::Path, max_days: u64) {
-    let cutoff = std::time::SystemTime::now()
-        - std::time::Duration::from_secs(max_days * 24 * 3600);
+    let cutoff =
+        std::time::SystemTime::now() - std::time::Duration::from_secs(max_days * 24 * 3600);
     let entries = match std::fs::read_dir(log_dir) {
         Ok(e) => e,
         Err(_) => return,
@@ -244,17 +259,25 @@ fn init_logging(log_dir: &std::path::Path) -> Result<tracing_appender::non_block
     let timer = time::format_description::parse("[hour]:[minute]:[second]").expect("time fmt");
     let timer = tracing_subscriber::fmt::time::UtcTime::new(timer);
 
-    let stdout = fmt::layer().with_target(false).with_timer(timer.clone()).compact();
+    let stdout = fmt::layer()
+        .with_target(false)
+        .with_timer(timer.clone())
+        .compact();
 
     // Rotation quotidienne : syncgdrive.log.2026-03-x
-    let (writer, guard) = tracing_appender::non_blocking(
-        tracing_appender::rolling::daily(log_dir, "syncgdrive.log")
-    );
-    let file_layer = fmt::layer().with_target(true).with_ansi(false).with_writer(writer);
+    let (writer, guard) =
+        tracing_appender::non_blocking(tracing_appender::rolling::daily(log_dir, "syncgdrive.log"));
+    let file_layer = fmt::layer()
+        .with_target(true)
+        .with_ansi(false)
+        .with_writer(writer);
 
     tracing_subscriber::registry()
-        .with(filter).with(stdout).with(file_layer)
-        .try_init().context("cannot init tracing")?;
+        .with(filter)
+        .with(stdout)
+        .with(file_layer)
+        .try_init()
+        .context("cannot init tracing")?;
 
     Ok(guard)
 }

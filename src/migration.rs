@@ -3,8 +3,8 @@
 //! Ce module centralise la logique de transition pour garantir qu'aucune donnée
 //! utilisateur n'est perdue lors du passage à la nouvelle architecture.
 
-use std::path::Path;
 use anyhow::{Context, Result};
+use std::path::Path;
 use tracing::{info, warn};
 
 use crate::config::AppConfig;
@@ -41,8 +41,12 @@ fn migrate_config(config_path: &Path) -> Result<AppConfig> {
         warn!("Ancienne configuration V1 détectée. Début de la migration...");
 
         let backup_path = config_path.with_extension("toml.v1.bak");
-        std::fs::write(&backup_path, &raw_toml)
-            .with_context(|| format!("Échec de la création du backup de sécurité vers {:?}", backup_path))?;
+        std::fs::write(&backup_path, &raw_toml).with_context(|| {
+            format!(
+                "Échec de la création du backup de sécurité vers {:?}",
+                backup_path
+            )
+        })?;
 
         info!("Backup de sécurité créé : {:?}", backup_path);
 
@@ -64,7 +68,8 @@ fn migrate_database(db_path: &Path) -> Result<()> {
     }
 
     let db = Database::open(db_path)?;
-    db.init_and_migrate().context("Échec lors de la migration du schéma SQLite")?;
+    db.init_and_migrate()
+        .context("Échec lors de la migration du schéma SQLite")?;
 
     Ok(())
 }
@@ -72,8 +77,8 @@ fn migrate_database(db_path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::NamedTempFile;
     use std::io::Write;
+    use tempfile::NamedTempFile;
 
     #[test]
     fn test_config_backup_created() {
@@ -88,19 +93,29 @@ mod tests {
 
         // Vérifie la création du fichier .bak
         let backup_path = f.path().with_extension("toml.v1.bak");
-        assert!(backup_path.exists(), "Le fichier de backup .v1.bak n'a pas été créé");
+        assert!(
+            backup_path.exists(),
+            "Le fichier de backup .v1.bak n'a pas été créé"
+        );
     }
 
     #[test]
     fn test_config_v1_fields_mapped() {
         let mut f = NamedTempFile::new().unwrap();
-        writeln!(f, "local_root = '/home/user/Sync'\nremote_root = 'gdrive:/Drive'").unwrap();
+        writeln!(
+            f,
+            "local_root = '/home/user/Sync'\nremote_root = 'gdrive:/Drive'"
+        )
+        .unwrap();
 
         let cfg = migrate_config(f.path()).unwrap();
 
         assert_eq!(cfg.sync_pairs.len(), 1);
         assert_eq!(cfg.sync_pairs[0].name, "Sync principal");
-        assert_eq!(cfg.sync_pairs[0].local_path.to_string_lossy(), "/home/user/Sync");
+        assert_eq!(
+            cfg.sync_pairs[0].local_path.to_string_lossy(),
+            "/home/user/Sync"
+        );
         assert_eq!(cfg.sync_pairs[0].provider, "GoogleDrive");
     }
 }

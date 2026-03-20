@@ -1,20 +1,19 @@
-use std::collections::VecDeque;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use reqwest::{Client, header};
-use std::sync::Arc;
-use std::path::Path;
 use chrono::DateTime;
+use reqwest::{header, Client};
+use std::collections::VecDeque;
+use std::path::Path;
+use std::sync::Arc;
 use tokio::io::AsyncReadExt;
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    RemoteProvider, RemoteIndex, UploadResult, ChangesPage, HealthStatus,
-    path_cache::PathCache,
+    path_cache::PathCache, ChangesPage, HealthStatus, RemoteIndex, RemoteProvider, UploadResult,
 };
 use crate::auth::GoogleAuth;
 use crate::config::AdvancedConfig;
-use crate::engine::bandwidth::{ProgressTracker, BandwidthLimiter};
+use crate::engine::bandwidth::{BandwidthLimiter, ProgressTracker};
 use crate::engine::rate_limiter::ApiRateLimiter; // NOUVEAU PHASE 6
 
 /// Le fournisseur Google Drive
@@ -67,7 +66,8 @@ impl GDriveProvider {
 
     /// Helper interne pour lire un en-tête Retry-After s'il existe
     fn parse_retry_after(headers: &header::HeaderMap) -> u64 {
-        headers.get(header::RETRY_AFTER)
+        headers
+            .get(header::RETRY_AFTER)
             .and_then(|v| v.to_str().ok())
             .and_then(|s| s.parse::<u64>().ok())
             .unwrap_or(60) // 60 secondes de pause par défaut si non spécifié
@@ -89,14 +89,14 @@ impl GDriveProvider {
         });
 
         if existing_id.is_none() {
-            meta_json.as_object_mut().unwrap().insert(
-                "parents".to_string(),
-                serde_json::json!([parent_id]),
-            );
+            meta_json
+                .as_object_mut()
+                .unwrap()
+                .insert("parents".to_string(), serde_json::json!([parent_id]));
         }
 
-        let metadata_part = reqwest::multipart::Part::text(meta_json.to_string())
-            .mime_str("application/json")?;
+        let metadata_part =
+            reqwest::multipart::Part::text(meta_json.to_string()).mime_str("application/json")?;
 
         let file_bytes = tokio::fs::read(local_path)
             .await
@@ -124,9 +124,15 @@ impl GDriveProvider {
             .part("file", file_part);
 
         let url = if let Some(id) = existing_id {
-            format!("{}/files/{}?uploadType=multipart&fields=id,md5Checksum,size", self.config.upload_base, id)
+            format!(
+                "{}/files/{}?uploadType=multipart&fields=id,md5Checksum,size",
+                self.config.upload_base, id
+            )
         } else {
-            format!("{}/files?uploadType=multipart&fields=id,md5Checksum,size", self.config.upload_base)
+            format!(
+                "{}/files?uploadType=multipart&fields=id,md5Checksum,size",
+                self.config.upload_base
+            )
         };
 
         let request_builder = if existing_id.is_some() {
@@ -135,10 +141,7 @@ impl GDriveProvider {
             self.client.post(&url)
         };
 
-        let request_future = request_builder
-            .bearer_auth(token)
-            .multipart(form)
-            .send();
+        let request_future = request_builder.bearer_auth(token).multipart(form).send();
 
         let res = tokio::select! {
             result = request_future => result.context("Erreur réseau lors de l'upload simple")?,
@@ -151,7 +154,10 @@ impl GDriveProvider {
         if res.status() == 429 {
             let wait = Self::parse_retry_after(res.headers());
             self.api_limiter.handle_rate_limit(wait).await;
-            anyhow::bail!("Erreur API 429 : Google Drive demande une pause de {}s", wait);
+            anyhow::bail!(
+                "Erreur API 429 : Google Drive demande une pause de {}s",
+                wait
+            );
             // La fonction `retry` du worker se chargera de recommencer plus tard
         }
 
@@ -185,14 +191,17 @@ impl GDriveProvider {
         let mut meta_json = serde_json::json!({ "name": file_name });
 
         if existing_id.is_none() {
-            meta_json.as_object_mut().unwrap().insert(
-                "parents".to_string(),
-                serde_json::json!([parent_id]),
-            );
+            meta_json
+                .as_object_mut()
+                .unwrap()
+                .insert("parents".to_string(), serde_json::json!([parent_id]));
         }
 
         let init_url = if let Some(id) = existing_id {
-            format!("{}/files/{}?uploadType=resumable", self.config.upload_base, id)
+            format!(
+                "{}/files/{}?uploadType=resumable",
+                self.config.upload_base, id
+            )
         } else {
             format!("{}/files?uploadType=resumable", self.config.upload_base)
         };
@@ -229,7 +238,6 @@ impl GDriveProvider {
             .to_str()?
             .to_string();
 
-
         // ─── ÉTAPE 2 : LE STREAMING MAGIQUE ! ───
         let file = tokio::fs::File::open(local_path)
             .await
@@ -261,7 +269,9 @@ impl GDriveProvider {
 
         self.api_limiter.acquire().await; // Péage API (le PUT de streaming compte comme une requête)
 
-        let put_future = self.client.put(&session_uri)
+        let put_future = self
+            .client
+            .put(&session_uri)
             .header(reqwest::header::CONTENT_LENGTH, file_size)
             .body(body)
             .send();
@@ -308,7 +318,8 @@ impl RemoteProvider for GDriveProvider {
         self.api_limiter.acquire().await; // Péage API
         let token = self.get_token().await?;
 
-        let res = self.client
+        let res = self
+            .client
             .get(format!("{}/about", self.config.api_base))
             .query(&[("fields", "user,storageQuota")])
             .bearer_auth(&token)
@@ -330,11 +341,26 @@ impl RemoteProvider for GDriveProvider {
 
         let data: serde_json::Value = res.json().await?;
 
-        let email = data["user"]["emailAddress"].as_str().unwrap_or("Inconnu").to_string();
-        let quota_used = data["storageQuota"]["usage"].as_str().unwrap_or("0").parse().unwrap_or(0);
-        let quota_total = data["storageQuota"]["limit"].as_str().unwrap_or("0").parse().unwrap_or(0);
+        let email = data["user"]["emailAddress"]
+            .as_str()
+            .unwrap_or("Inconnu")
+            .to_string();
+        let quota_used = data["storageQuota"]["usage"]
+            .as_str()
+            .unwrap_or("0")
+            .parse()
+            .unwrap_or(0);
+        let quota_total = data["storageQuota"]["limit"]
+            .as_str()
+            .unwrap_or("0")
+            .parse()
+            .unwrap_or(0);
 
-        Ok(HealthStatus::Ok { email, quota_used, quota_total })
+        Ok(HealthStatus::Ok {
+            email,
+            quota_used,
+            quota_total,
+        })
     }
 
     async fn list_remote(&self, root_id: &str) -> Result<RemoteIndex> {
@@ -367,7 +393,10 @@ impl RemoteProvider for GDriveProvider {
                     request = request.query(&[("pageToken", pt)]);
                 }
 
-                let res = request.send().await.context("Erreur réseau lors du listing BFS")?;
+                let res = request
+                    .send()
+                    .await
+                    .context("Erreur réseau lors du listing BFS")?;
 
                 if res.status() == 429 {
                     let wait = Self::parse_retry_after(res.headers());
@@ -378,7 +407,11 @@ impl RemoteProvider for GDriveProvider {
                 }
 
                 if !res.status().is_success() {
-                    anyhow::bail!("Erreur API lors du listing du dossier {} : {}", current_path, res.status());
+                    anyhow::bail!(
+                        "Erreur API lors du listing du dossier {} : {}",
+                        current_path,
+                        res.status()
+                    );
                 }
 
                 let data: serde_json::Value = res.json().await?;
@@ -404,7 +437,11 @@ impl RemoteProvider for GDriveProvider {
                             queue.push_back((id, rel_path));
                         } else {
                             let md5 = item["md5Checksum"].as_str().unwrap_or_default().to_string();
-                            let size = item["size"].as_str().unwrap_or("0").parse::<u64>().unwrap_or(0);
+                            let size = item["size"]
+                                .as_str()
+                                .unwrap_or("0")
+                                .parse::<u64>()
+                                .unwrap_or(0);
 
                             let time_str = item["modifiedTime"].as_str().unwrap_or_default();
                             let modified_time = DateTime::parse_from_rfc3339(time_str)
@@ -444,7 +481,8 @@ impl RemoteProvider for GDriveProvider {
             safe_name, parent_id
         );
 
-        let search_res = self.client
+        let search_res = self
+            .client
             .get(format!("{}/files", self.config.api_base))
             .query(&[("q", query.as_str()), ("fields", "files(id)")])
             .bearer_auth(&token)
@@ -458,7 +496,10 @@ impl RemoteProvider for GDriveProvider {
         }
 
         if !search_res.status().is_success() {
-            anyhow::bail!("Erreur API lors de la vérification du dossier : {}", search_res.status());
+            anyhow::bail!(
+                "Erreur API lors de la vérification du dossier : {}",
+                search_res.status()
+            );
         }
 
         let search_data: serde_json::Value = search_res.json().await?;
@@ -478,7 +519,8 @@ impl RemoteProvider for GDriveProvider {
         });
 
         self.api_limiter.acquire().await; // Péage API (Create)
-        let create_res = self.client
+        let create_res = self
+            .client
             .post(format!("{}/files", self.config.api_base))
             .json(&body)
             .bearer_auth(&token)
@@ -492,7 +534,10 @@ impl RemoteProvider for GDriveProvider {
         }
 
         if !create_res.status().is_success() {
-            anyhow::bail!("Erreur API lors de la création du dossier : {}", create_res.status());
+            anyhow::bail!(
+                "Erreur API lors de la création du dossier : {}",
+                create_res.status()
+            );
         }
 
         let create_data: serde_json::Value = create_res.json().await?;
@@ -519,9 +564,18 @@ impl RemoteProvider for GDriveProvider {
         let chunk_threshold = self.config.chunk_threshold;
 
         if file_size <= chunk_threshold {
-            self.upload_simple(local_path, parent_id, file_name, existing_id, tracker).await
+            self.upload_simple(local_path, parent_id, file_name, existing_id, tracker)
+                .await
         } else {
-            self.upload_resumable(local_path, parent_id, file_name, existing_id, file_size, tracker).await
+            self.upload_resumable(
+                local_path,
+                parent_id,
+                file_name,
+                existing_id,
+                file_size,
+                tracker,
+            )
+            .await
         }
     }
 
@@ -553,7 +607,10 @@ impl RemoteProvider for GDriveProvider {
         }
 
         if !res.status().is_success() {
-            anyhow::bail!("Erreur API lors de la suppression/mise à la corbeille : {}", res.status());
+            anyhow::bail!(
+                "Erreur API lors de la suppression/mise à la corbeille : {}",
+                res.status()
+            );
         }
 
         Ok(())
@@ -567,7 +624,8 @@ impl RemoteProvider for GDriveProvider {
     ) -> Result<()> {
         let token = self.get_token().await?;
 
-        let mut request = self.client
+        let mut request = self
+            .client
             .patch(format!("{}/files/{}", self.config.api_base, file_id))
             .bearer_auth(&token);
 
@@ -578,8 +636,12 @@ impl RemoteProvider for GDriveProvider {
 
         if let Some(new_parent) = new_parent_id {
             self.api_limiter.acquire().await; // Péage API (Get parents)
-            let get_res = self.client
-                .get(format!("{}/files/{}?fields=parents", self.config.api_base, file_id))
+            let get_res = self
+                .client
+                .get(format!(
+                    "{}/files/{}?fields=parents",
+                    self.config.api_base, file_id
+                ))
                 .bearer_auth(&token)
                 .send()
                 .await?;
@@ -593,12 +655,13 @@ impl RemoteProvider for GDriveProvider {
             if get_res.status().is_success() {
                 let get_data: serde_json::Value = get_res.json().await?;
                 if let Some(parents) = get_data["parents"].as_array() {
-                    let old_parents: Vec<&str> = parents.iter().filter_map(|p| p.as_str()).collect();
+                    let old_parents: Vec<&str> =
+                        parents.iter().filter_map(|p| p.as_str()).collect();
                     let remove_parents_str = old_parents.join(",");
 
                     request = request.query(&[
                         ("addParents", new_parent),
-                        ("removeParents", &remove_parents_str)
+                        ("removeParents", &remove_parents_str),
                     ]);
                 }
             }
@@ -614,7 +677,10 @@ impl RemoteProvider for GDriveProvider {
         }
 
         if !res.status().is_success() {
-            anyhow::bail!("Erreur API lors du renommage/déplacement : {}", res.status());
+            anyhow::bail!(
+                "Erreur API lors du renommage/déplacement : {}",
+                res.status()
+            );
         }
 
         Ok(())
@@ -627,7 +693,8 @@ impl RemoteProvider for GDriveProvider {
         let current_cursor = match cursor {
             Some(c) => c.to_string(),
             None => {
-                let res = self.client
+                let res = self
+                    .client
                     .get(format!("{}/changes/startPageToken", self.config.api_base))
                     .bearer_auth(&token)
                     .send()
@@ -636,7 +703,10 @@ impl RemoteProvider for GDriveProvider {
                 if res.status() == 429 {
                     let wait = Self::parse_retry_after(res.headers());
                     self.api_limiter.handle_rate_limit(wait).await;
-                    anyhow::bail!("Erreur API 429 (get_changes startToken) : Pause de {}s", wait);
+                    anyhow::bail!(
+                        "Erreur API 429 (get_changes startToken) : Pause de {}s",
+                        wait
+                    );
                 }
 
                 let data: serde_json::Value = res.json().await?;
@@ -665,7 +735,10 @@ impl RemoteProvider for GDriveProvider {
         }
 
         if !res.status().is_success() {
-            anyhow::bail!("Erreur API lors de la récupération des changements : {}", res.status());
+            anyhow::bail!(
+                "Erreur API lors de la récupération des changements : {}",
+                res.status()
+            );
         }
 
         let data: serde_json::Value = res.json().await?;
@@ -690,7 +763,7 @@ impl RemoteProvider for GDriveProvider {
                     changes.push(crate::remote::Change::Modified {
                         drive_id: file_id,
                         name,
-                        parent_id
+                        parent_id,
                     });
                 }
             }
@@ -704,7 +777,11 @@ impl RemoteProvider for GDriveProvider {
 
         let has_more = data["nextPageToken"].as_str().is_some();
 
-        Ok(ChangesPage { changes, new_cursor, has_more })
+        Ok(ChangesPage {
+            changes,
+            new_cursor,
+            has_more,
+        })
     }
 
     async fn shutdown(&self) {
@@ -716,12 +793,12 @@ impl RemoteProvider for GDriveProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::AdvancedConfig;
     use crate::auth::oauth2::GoogleTokens;
+    use crate::config::AdvancedConfig;
     use mockito::Server;
-    use tokio_util::sync::CancellationToken;
     use std::sync::Arc;
     use tokio::sync::Mutex as AsyncMutex;
+    use tokio_util::sync::CancellationToken;
 
     static TEST_MUTEX: AsyncMutex<()> = AsyncMutex::const_new(());
 
@@ -755,7 +832,8 @@ mod tests {
             Arc::new(PathCache::new()),
             Arc::new(config),
             CancellationToken::new(),
-        ).unwrap()
+        )
+        .unwrap()
     }
 
     #[tokio::test]
@@ -763,28 +841,39 @@ mod tests {
         let _guard = TEST_MUTEX.lock().await;
         let mut server = Server::new_async().await;
 
-        let mock = server.mock("GET", "/about")
+        let mock = server
+            .mock("GET", "/about")
             .match_query(mockito::Matcher::Any)
             .match_header("authorization", "Bearer fake_access_token")
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(r#"{
+            .with_body(
+                r#"{
                 "user": { "emailAddress": "bella@filippozzi.fr" },
                 "storageQuota": { "usage": "1500", "limit": "15000" }
-            }"#)
-            .create_async().await;
+            }"#,
+            )
+            .create_async()
+            .await;
 
         let provider = setup_mock_provider(server.url()).await;
-        let status = provider.check_health().await.expect("check_health a échoué");
+        let status = provider
+            .check_health()
+            .await
+            .expect("check_health a échoué");
 
         mock.assert_async().await;
 
         match status {
-            HealthStatus::Ok { email, quota_used, quota_total } => {
+            HealthStatus::Ok {
+                email,
+                quota_used,
+                quota_total,
+            } => {
                 assert_eq!(email, "bella@filippozzi.fr");
                 assert_eq!(quota_used, 1500);
                 assert_eq!(quota_total, 15000);
-            },
+            }
             _ => panic!("Le statut de santé devrait être Ok"),
         }
     }
@@ -794,22 +883,29 @@ mod tests {
         let _guard = TEST_MUTEX.lock().await;
         let mut server = Server::new_async().await;
 
-        let mock = server.mock("POST", "/files")
+        let mock = server
+            .mock("POST", "/files")
             .match_query(mockito::Matcher::Regex(r".*uploadType=multipart.*".into()))
             .match_header("authorization", "Bearer fake_access_token")
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(r#"{"id": "file_simple_123", "md5Checksum": "abcde", "size": "15"}"#)
-            .create_async().await;
+            .create_async()
+            .await;
 
         let provider = setup_mock_provider(server.url()).await;
         let tracker = Arc::new(ProgressTracker::new());
 
         let temp_dir = std::env::temp_dir();
         let file_path = temp_dir.join("test_simple.txt");
-        tokio::fs::write(&file_path, "Hello Arch Linux!").await.unwrap();
+        tokio::fs::write(&file_path, "Hello Arch Linux!")
+            .await
+            .unwrap();
 
-        let res = provider.upload(&file_path, "parent_id", "test_simple.txt", None, tracker).await.unwrap();
+        let res = provider
+            .upload(&file_path, "parent_id", "test_simple.txt", None, tracker)
+            .await
+            .unwrap();
 
         mock.assert_async().await;
         assert_eq!(res.drive_id, "file_simple_123");
@@ -821,16 +917,20 @@ mod tests {
         let _guard = TEST_MUTEX.lock().await;
         let mut server = Server::new_async().await;
 
-        let mock_init = server.mock("POST", "/files")
+        let mock_init = server
+            .mock("POST", "/files")
             .match_query(mockito::Matcher::Regex(r".*uploadType=resumable.*".into()))
             .with_status(200)
             .with_header("Location", &format!("{}/upload_session_123", server.url()))
-            .create_async().await;
+            .create_async()
+            .await;
 
-        let mock_chunk = server.mock("PUT", "/upload_session_123")
+        let mock_chunk = server
+            .mock("PUT", "/upload_session_123")
             .with_status(200)
             .with_body(r#"{"id": "resumable_123", "md5Checksum": "chk", "size": "6000000"}"#)
-            .create_async().await;
+            .create_async()
+            .await;
 
         let provider = setup_mock_provider(server.url()).await;
         let tracker = Arc::new(ProgressTracker::new());
@@ -840,7 +940,17 @@ mod tests {
         let file = std::fs::File::create(&file_path).unwrap();
         file.set_len(6_000_000).unwrap();
 
-        let res = provider.upload_resumable(&file_path, "parent", "test_lourd.bin", None, 6_000_000, tracker).await.unwrap();
+        let res = provider
+            .upload_resumable(
+                &file_path,
+                "parent",
+                "test_lourd.bin",
+                None,
+                6_000_000,
+                tracker,
+            )
+            .await
+            .unwrap();
 
         mock_init.assert_async().await;
         mock_chunk.assert_async().await;

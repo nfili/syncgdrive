@@ -72,13 +72,13 @@
 //! ]
 //! ```
 
+pub mod auth;
 pub mod config;
 pub mod db;
 pub mod engine;
 pub mod ignore;
-pub mod notif;
 pub mod migration;
-pub mod auth;
+pub mod notif;
 pub mod remote;
 #[cfg(feature = "ui")]
 pub mod ui;

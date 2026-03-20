@@ -1,8 +1,8 @@
+use anyhow::{Context, Result};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use anyhow::{Context, Result};
+use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
@@ -10,11 +10,11 @@ use walkdir::WalkDir;
 
 use crate::config::AppConfig;
 use crate::db::{Database, FileEntry};
-use crate::engine::{EngineStatus, ScanPhase, Task};
 use crate::engine::bandwidth::ProgressTracker;
+use crate::engine::{EngineStatus, ScanPhase, Task};
 use crate::ignore::IgnoreMatcher;
 use crate::notif;
-use crate::remote::{RemoteProvider, path_cache::PathCache};
+use crate::remote::{path_cache::PathCache, RemoteProvider};
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run(
@@ -33,32 +33,52 @@ pub(crate) async fn run(
 
     // ── Phase 0 : listing récursif du remote (BFS GDrive) ──────────────────
     let _ = status_tx.send(EngineStatus::ScanProgress {
-        phase: ScanPhase::RemoteListing, done: 0, total: 0, current: "listing remote…".into(),
+        phase: ScanPhase::RemoteListing,
+        done: 0,
+        total: 0,
+        current: "listing remote…".into(),
     });
 
     let t0 = std::time::Instant::now();
-    let remote_index = match provider.list_remote(&cfg.sync_pairs[0].remote_folder_id).await {
+    let remote_index = match provider
+        .list_remote(&cfg.sync_pairs[0].remote_folder_id)
+        .await
+    {
         Ok(idx) => {
-            info!(count = idx.files.len() + idx.dirs.len(), elapsed_ms = t0.elapsed().as_millis(), "scan: remote index built");
+            info!(
+                count = idx.files.len() + idx.dirs.len(),
+                elapsed_ms = t0.elapsed().as_millis(),
+                "scan: remote index built"
+            );
             idx
         }
         Err(e) => {
             tracing::warn!(error = %e, elapsed_ms = t0.elapsed().as_millis(), "scan: remote listing failed, assuming empty");
-            crate::remote::RemoteIndex { files: vec![], dirs: vec![] }
+            crate::remote::RemoteIndex {
+                files: vec![],
+                dirs: vec![],
+            }
         }
     };
 
     // On peuple le cache global immédiatement
     for dir in &remote_index.dirs {
-        path_cache.insert(&dir.relative_path, &dir.drive_id, &dir.parent_id).await;
+        path_cache
+            .insert(&dir.relative_path, &dir.drive_id, &dir.parent_id)
+            .await;
     }
     for file in &remote_index.files {
-        path_cache.insert(&file.relative_path, &file.drive_id, &file.parent_id).await;
+        path_cache
+            .insert(&file.relative_path, &file.drive_id, &file.parent_id)
+            .await;
     }
 
     // ── Phase 1 : inventaire filesystem local ─────────────────────────────────
     let _ = status_tx.send(EngineStatus::ScanProgress {
-        phase: ScanPhase::LocalListing, done: 0, total: 0, current: "inventaire local…".into(),
+        phase: ScanPhase::LocalListing,
+        done: 0,
+        total: 0,
+        current: "inventaire local…".into(),
     });
 
     let mut local_dirs: Vec<PathBuf> = Vec::new();
@@ -97,7 +117,11 @@ pub(crate) async fn run(
 
     let total_dirs = local_dirs.len();
     let total_files = local_files.len();
-    info!(dirs = total_dirs, files = total_files, "scan: inventaire terminé");
+    info!(
+        dirs = total_dirs,
+        files = total_files,
+        "scan: inventaire terminé"
+    );
 
     // ── Phase 2 : création des dossiers distants manquants ────────────────────
     let t2 = std::time::Instant::now();
@@ -108,10 +132,13 @@ pub(crate) async fn run(
         if shutdown.is_cancelled() {
             anyhow::bail!("shutdown: scan interrupted");
         }
-        let rel = dir_path.strip_prefix(&cfg.sync_pairs[0].local_path).unwrap();
+        let rel = dir_path
+            .strip_prefix(&cfg.sync_pairs[0].local_path)
+            .unwrap();
         let rel_str = rel.to_string_lossy().to_string();
 
-        let dir_name = rel.file_name()
+        let dir_name = rel
+            .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_default();
 
@@ -137,7 +164,9 @@ pub(crate) async fn run(
 
         for comp in rel.components() {
             let part = comp.as_os_str().to_string_lossy().to_string();
-            if !current_rel.is_empty() { current_rel.push('/'); }
+            if !current_rel.is_empty() {
+                current_rel.push('/');
+            }
             current_rel.push_str(&part);
 
             if let Some(entry) = path_cache.lookup(&current_rel).await {
@@ -152,9 +181,12 @@ pub(crate) async fn run(
                     let parent = cur_parent_clone.clone();
                     let pt = part_clone.clone();
                     async move { p_inner.mkdir(&parent, &pt).await }
-                }).await?;
+                })
+                .await?;
 
-                path_cache.insert(&current_rel, &new_id, &current_parent).await;
+                path_cache
+                    .insert(&current_rel, &new_id, &current_parent)
+                    .await;
                 current_parent = new_id;
                 dirs_created += 1;
             }
@@ -162,14 +194,19 @@ pub(crate) async fn run(
     }
 
     info!(
-        dirs = total_dirs, verified = dirs_verified, created = dirs_created,
+        dirs = total_dirs,
+        verified = dirs_verified,
+        created = dirs_created,
         elapsed_ms = t2.elapsed().as_millis(),
         "scan: dossiers OK"
     );
 
     // ── Phase 3 : comparaison fichiers local ↔ DB ─────────────────────────────
     let _ = status_tx.send(EngineStatus::ScanProgress {
-        phase: ScanPhase::Comparing, done: 0, total: total_files, current: "comparaison…".into(),
+        phase: ScanPhase::Comparing,
+        done: 0,
+        total: total_files,
+        current: "comparaison…".into(),
     });
 
     let db_clone = db.clone();
@@ -191,7 +228,8 @@ pub(crate) async fn run(
             Err(_) => continue,
         };
 
-        let file_name = file_path.file_name()
+        let file_name = file_path
+            .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_default();
 
@@ -207,7 +245,8 @@ pub(crate) async fn run(
         // NOUVEAU: On vérifie d'abord si le fichier existe vraiment sur Google Drive !
         let remote_exists = path_cache.lookup(&rel).await.is_some();
 
-        if db_index.contains(&rel) && remote_exists { // <-- SÉCURITÉ ICI
+        if db_index.contains(&rel) && remote_exists {
+            // <-- SÉCURITÉ ICI
             if let Ok(Some(entry)) = db.get(&rel) {
                 let mtime = mtime_of(file_path);
                 // On skip SEULEMENT si la date est bonne ET qu'il est sur le Drive
@@ -217,7 +256,11 @@ pub(crate) async fn run(
                 }
                 if let Ok(hash) = hash_of(file_path).await {
                     if hash == entry.hash {
-                        let _ = db.upsert(&FileEntry { path: rel, hash, mtime });
+                        let _ = db.upsert(&FileEntry {
+                            path: rel,
+                            hash,
+                            mtime,
+                        });
                         skipped += 1;
                         continue;
                     }
@@ -227,7 +270,11 @@ pub(crate) async fn run(
             // Il est sur le Drive mais pas dans notre DB (ou on l'a oublié)
             if let Ok(hash) = hash_of(file_path).await {
                 let mtime = mtime_of(file_path);
-                let _ = db.upsert(&FileEntry { path: rel, hash, mtime });
+                let _ = db.upsert(&FileEntry {
+                    path: rel,
+                    hash,
+                    mtime,
+                });
             }
             skipped_remote += 1;
             continue;
@@ -239,17 +286,23 @@ pub(crate) async fn run(
 
     to_sync.retain(|p| std::fs::metadata(p).map(|m| m.len() > 0).unwrap_or(false));
 
-    info!(to_sync = to_sync.len(), skipped, skipped_remote, "scan: comparaison terminée");
+    info!(
+        to_sync = to_sync.len(),
+        skipped, skipped_remote, "scan: comparaison terminée"
+    );
     notif::scan_complete(cfg, total_dirs, to_sync.len(), skipped + skipped_remote);
 
     // NOUVEAU : Calcul du poids total AVANT l'envoi en queue
-    let total_to_sync_bytes: u64 = to_sync.iter()
+    let total_to_sync_bytes: u64 = to_sync
+        .iter()
         .map(|p| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0))
         .sum();
 
     // On initialise le tracker avec les vraies valeurs finales
     tracker.total_files.store(to_sync.len(), Ordering::Relaxed);
-    tracker.total_bytes.store(total_to_sync_bytes, Ordering::Relaxed);
+    tracker
+        .total_bytes
+        .store(total_to_sync_bytes, Ordering::Relaxed);
 
     // ── Phase 4 : enqueue les fichiers à synchroniser ─────────────────────────
     let sync_total = to_sync.len();
@@ -258,7 +311,8 @@ pub(crate) async fn run(
             anyhow::bail!("shutdown: scan interrupted");
         }
 
-        let file_name = path.file_name()
+        let file_name = path
+            .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_default();
         let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
@@ -283,7 +337,8 @@ pub(crate) async fn run(
         info!(files = sync_total, "scan: fichiers en queue");
     }
 
-    let local_rel_set: HashSet<String> = local_files.iter()
+    let local_rel_set: HashSet<String> = local_files
+        .iter()
         .filter_map(|p| p.strip_prefix(&cfg.sync_pairs[0].local_path).ok())
         .map(|r| r.to_string_lossy().to_string())
         .collect();
@@ -305,7 +360,10 @@ pub(crate) async fn run(
             }
         }
         if orphans_db > 0 {
-            info!(orphans_db, "scan: orphelins DB (supprimés localement) → suppression remote");
+            info!(
+                orphans_db,
+                "scan: orphelins DB (supprimés localement) → suppression remote"
+            );
         }
     }
 
@@ -319,12 +377,20 @@ pub(crate) async fn run(
             }
             let rel = &remote_file.relative_path;
 
-            if local_rel_set.contains(rel) { continue; }
+            if local_rel_set.contains(rel) {
+                continue;
+            }
 
             let local_path = cfg.sync_pairs[0].local_path.join(rel);
-            if local_path.is_dir() { continue; }
-            if db_index.contains(rel) { continue; }
-            if ignore.is_ignored(&local_path) { continue; }
+            if local_path.is_dir() {
+                continue;
+            }
+            if db_index.contains(rel) {
+                continue;
+            }
+            if ignore.is_ignored(&local_path) {
+                continue;
+            }
 
             tracker.total_files.fetch_add(1, Ordering::Relaxed);
             if task_tx.send(Task::Delete(local_path)).await.is_err() {
@@ -333,7 +399,10 @@ pub(crate) async fn run(
             orphans_remote += 1;
         }
         if orphans_remote > 0 {
-            info!(orphans_remote, "scan: orphelins remote (absents localement) → suppression remote");
+            info!(
+                orphans_remote,
+                "scan: orphelins remote (absents localement) → suppression remote"
+            );
         }
     }
 
@@ -345,7 +414,10 @@ pub(crate) async fn run(
 fn mtime_of(path: &Path) -> i64 {
     std::fs::metadata(path)
         .and_then(|m| m.modified())
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).map_err(std::io::Error::other))
+        .and_then(|t| {
+            t.duration_since(std::time::UNIX_EPOCH)
+                .map_err(std::io::Error::other)
+        })
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
 }
@@ -385,7 +457,14 @@ where
                 if attempt >= max_attempts {
                     return Err(e);
                 }
-                tracing::warn!("{} a échoué (essai {}/{}) : {}, nouvelle tentative dans {}ms", name, attempt, max_attempts, e, backoff);
+                tracing::warn!(
+                    "{} a échoué (essai {}/{}) : {}, nouvelle tentative dans {}ms",
+                    name,
+                    attempt,
+                    max_attempts,
+                    e,
+                    backoff
+                );
                 tokio::select! {
                     _ = tokio::time::sleep(std::time::Duration::from_millis(backoff)) => {}
                     _ = shutdown.cancelled() => anyhow::bail!("Annulé proprement pendant le retry"),
@@ -464,11 +543,7 @@ mod tests {
 
     #[test]
     fn non_fatal_errors() {
-        let cases = vec![
-            "connection timed out",
-            "network unreachable",
-            "copy failed",
-        ];
+        let cases = vec!["connection timed out", "network unreachable", "copy failed"];
         for msg in cases {
             let e = anyhow::anyhow!("{msg}");
             assert!(!is_fatal_remote_err(&e), "should NOT be fatal: {msg}");

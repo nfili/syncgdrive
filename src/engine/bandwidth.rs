@@ -93,7 +93,9 @@ impl ProgressTracker {
     // ─── LOGIQUE INTERNE (SANS VERROU - Pour éviter les deadlocks) ───
 
     fn _calculate_speed(state: &TrackerState) -> u64 {
-        if state.speed_samples.len() < 2 { return 0; }
+        if state.speed_samples.len() < 2 {
+            return 0;
+        }
 
         let (first_ts, first_bytes) = state.speed_samples.front().unwrap();
         let (last_ts, last_bytes) = state.speed_samples.back().unwrap();
@@ -107,7 +109,9 @@ impl ProgressTracker {
     }
 
     fn _calculate_eta_secs(speed: u64, total: u64, sent: u64) -> Option<u64> {
-        if speed == 0 || sent >= total { return None; }
+        if speed == 0 || sent >= total {
+            return None;
+        }
         Some((total - sent) / speed)
     }
 
@@ -192,7 +196,9 @@ impl BandwidthLimiter {
     }
 
     pub async fn acquire(&self, n: u64) {
-        if self.limit_bps == 0 { return; }
+        if self.limit_bps == 0 {
+            return;
+        }
 
         loop {
             let delay = {
@@ -256,7 +262,10 @@ mod tests {
         let limiter = BandwidthLimiter::new(0);
         let start = Instant::now();
         limiter.acquire(10_000_000).await; // 10 Mo
-        assert!(start.elapsed() < Duration::from_millis(5), "Illimité doit retourner immédiatement");
+        assert!(
+            start.elapsed() < Duration::from_millis(5),
+            "Illimité doit retourner immédiatement"
+        );
     }
 
     #[tokio::test]
@@ -272,8 +281,16 @@ mod tests {
         limiter.acquire(5120).await;
         let elapsed = start.elapsed();
 
-        assert!(elapsed >= Duration::from_millis(450), "Le limiteur n'a pas ralenti le flux. Durée: {:?}", elapsed);
-        assert!(elapsed < Duration::from_millis(600), "Le limiteur est trop lent. Durée: {:?}", elapsed);
+        assert!(
+            elapsed >= Duration::from_millis(450),
+            "Le limiteur n'a pas ralenti le flux. Durée: {:?}",
+            elapsed
+        );
+        assert!(
+            elapsed < Duration::from_millis(600),
+            "Le limiteur est trop lent. Durée: {:?}",
+            elapsed
+        );
     }
 
     #[test]
@@ -285,7 +302,9 @@ mod tests {
         let now = Instant::now();
 
         // On a envoyé 0 octets il y a 2 secondes
-        state.speed_samples.push_back((now - Duration::from_secs(2), 0));
+        state
+            .speed_samples
+            .push_back((now - Duration::from_secs(2), 0));
         // On a envoyé 5000 octets maintenant
         state.speed_samples.push_back((now, 5000));
         drop(state);
@@ -306,7 +325,14 @@ mod tests {
         let snap = tracker.snapshot();
 
         // Le snapshot DOIT refléter la somme exacte, sans aucune perte
-        assert_eq!(snap.current_bytes_sent, 1000, "Le snapshot a perdu des octets locaux");
-        assert_eq!(tracker.sent_bytes.load(Ordering::Relaxed), 1000, "Les compteurs atomiques ont divergé");
+        assert_eq!(
+            snap.current_bytes_sent, 1000,
+            "Le snapshot a perdu des octets locaux"
+        );
+        assert_eq!(
+            tracker.sent_bytes.load(Ordering::Relaxed),
+            1000,
+            "Les compteurs atomiques ont divergé"
+        );
     }
 }

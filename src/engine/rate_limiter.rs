@@ -26,7 +26,9 @@ impl ApiRateLimiter {
 
     /// Attend qu'un slot soit disponible avant d'envoyer une requête API.
     pub async fn acquire(&self) {
-        if self.max_rps == 0 { return; }
+        if self.max_rps == 0 {
+            return;
+        }
 
         loop {
             let delay = {

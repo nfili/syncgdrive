@@ -42,7 +42,9 @@ pub fn resumed(_cfg: &AppConfig) {}
 /// Synchronisation initiale terminée (§4A UX_SYSTRAY.md).
 /// Pop-up auto-dismiss après 6 secondes.
 pub fn initial_sync_complete(cfg: &AppConfig) {
-    if !cfg.notifications { return; }
+    if !cfg.notifications {
+        return;
+    }
     send(
         "SyncGDrive — Synchronisation terminée ✓",
         "Le dossier est à jour.\nSurveillance active, vous pouvez travailler en toute sécurité.",
@@ -55,7 +57,9 @@ pub fn initial_sync_complete(cfg: &AppConfig) {
 /// Erreur fatale (auth, chemin, quota…).
 /// Reste à l'écran jusqu'à fermeture manuelle (sticky).
 pub fn error(cfg: &AppConfig, message: &str) {
-    if !cfg.notifications { return; }
+    if !cfg.notifications {
+        return;
+    }
     send(
         "SyncGDrive — Action requise ⚠",
         message,
@@ -68,7 +72,9 @@ pub fn error(cfg: &AppConfig, message: &str) {
 /// Dossier local surveillé introuvable (§4B UX_SYSTRAY.md).
 /// Sticky : reste jusqu'à fermeture manuelle.
 pub fn folder_missing(cfg: &AppConfig, path: &str) {
-    if !cfg.notifications { return; }
+    if !cfg.notifications {
+        return;
+    }
     send(
         "SyncGDrive — Dossier introuvable",
         &format!("Le dossier surveillé « {path} » a été renommé ou supprimé.\nMoteur en pause."),
@@ -81,7 +87,9 @@ pub fn folder_missing(cfg: &AppConfig, path: &str) {
 /// Quota Google Drive ou disque plein (§4B UX_SYSTRAY.md).
 /// Sticky : reste jusqu'à fermeture manuelle.
 pub fn quota_exceeded(cfg: &AppConfig) {
-    if !cfg.notifications { return; }
+    if !cfg.notifications {
+        return;
+    }
     send(
         "SyncGDrive — Espace insuffisant",
         "Quota Google Drive ou disque local plein.\nTransferts suspendus.",
@@ -91,6 +99,34 @@ pub fn quota_exceeded(cfg: &AppConfig) {
     );
 }
 
+// Réseau retrouvé après coupure (Phase 6).
+/// Pop-up bureau pour rassurer l'utilisateur.
+pub fn connection_restored(cfg: &AppConfig) {
+    if !cfg.notifications {
+        return;
+    }
+    send(
+        "SyncGDrive — Connexion rétablie 🌐",
+        "Le réseau est de nouveau disponible.\nSynchronisation des modifications en attente...",
+        "network-transmit-receive-symbolic",
+        Urgency::Normal,
+        cfg.advanced.notification_timeout_ms,
+    );
+}
+
+/// Connexion perdue, passage en mode survie (Phase 6).
+pub fn connection_lost(cfg: &AppConfig) {
+    if !cfg.notifications {
+        return;
+    }
+    send(
+        "SyncGDrive — Connexion perdue ⚠️",
+        "Le réseau est indisponible. Passage en mode SURVIE.\nVos modifications sont sauvegardées en attente du retour en ligne.",
+        "network-offline-symbolic",
+        Urgency::Critical,
+        0, // 0 = Reste affiché jusqu'au clic (recommandé pour une perte de connexion)
+    );
+}
 // ── Interne ───────────────────────────────────────────────────────────────
 
 fn send(summary: &str, body: &str, icon: &str, urgency: Urgency, timeout_ms: i32) {
@@ -99,8 +135,8 @@ fn send(summary: &str, body: &str, icon: &str, urgency: Urgency, timeout_ms: i32
     // Solution : envoyer la notification depuis un thread OS séparé (pas de
     // contexte Tokio → block_on fonctionne normalement).
     let summary = summary.to_owned();
-    let body    = body.to_owned();
-    let icon    = icon.to_owned();
+    let body = body.to_owned();
+    let icon = icon.to_owned();
     std::thread::spawn(move || {
         if let Err(e) = Notification::new()
             .appname("SyncGDrive")

@@ -1,6 +1,6 @@
+use super::GoogleTokens;
 use anyhow::{Context, Result};
 use std::path::PathBuf;
-use super::GoogleTokens;
 
 // Importation des outils de cryptographie (déjà dans ton Cargo.toml et worker)
 use aes_gcm::{
@@ -40,14 +40,15 @@ impl EncryptedFileStorage {
 
 impl TokenStorage for EncryptedFileStorage {
     fn store(&self, tokens: &GoogleTokens) -> Result<()> {
-        let json = serde_json::to_string(tokens)
-            .context("Erreur de sérialisation des tokens")?;
+        let json = serde_json::to_string(tokens).context("Erreur de sérialisation des tokens")?;
 
         // Génération d'un vecteur d'initialisation unique (Nonce) de 12 octets
         let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
 
         // Chiffrement
-        let ciphertext = self.cipher.encrypt(&nonce, json.as_bytes())
+        let ciphertext = self
+            .cipher
+            .encrypt(&nonce, json.as_bytes())
             .map_err(|e| anyhow::anyhow!("Échec du chiffrement AES: {:?}", e))?;
 
         // On concatène le Nonce (nécessaire au déchiffrement) et le texte chiffré
@@ -81,8 +82,7 @@ impl TokenStorage for EncryptedFileStorage {
             return Ok(None);
         }
 
-        let data = std::fs::read(&self.path)
-            .context("Impossible de lire le fichier chiffré")?;
+        let data = std::fs::read(&self.path).context("Impossible de lire le fichier chiffré")?;
 
         // Le fichier doit faire au moins la taille du nonce (12 octets)
         if data.len() < 12 {
@@ -93,14 +93,14 @@ impl TokenStorage for EncryptedFileStorage {
         let ciphertext = &data[12..];
 
         // Déchiffrement
-        let plaintext = self.cipher.decrypt(nonce, ciphertext)
-            .map_err(|_| anyhow::anyhow!("Échec du déchiffrement. Le CLIENT_SECRET a-t-il changé ?"))?;
+        let plaintext = self.cipher.decrypt(nonce, ciphertext).map_err(|_| {
+            anyhow::anyhow!("Échec du déchiffrement. Le CLIENT_SECRET a-t-il changé ?")
+        })?;
 
         let json = String::from_utf8(plaintext)
             .context("Les données déchiffrées ne sont pas du texte valide")?;
 
-        let tokens = serde_json::from_str(&json)
-            .context("Structure JSON des tokens corrompue")?;
+        let tokens = serde_json::from_str(&json).context("Structure JSON des tokens corrompue")?;
 
         Ok(Some(tokens))
     }
@@ -162,7 +162,10 @@ mod tests {
         storage.store(&tokens).expect("Store failed");
 
         // Load
-        let loaded = storage.load().expect("Load failed").expect("Tokens should exist");
+        let loaded = storage
+            .load()
+            .expect("Load failed")
+            .expect("Tokens should exist");
 
         // Identiques
         assert_eq!(loaded.access_token, tokens.access_token);
@@ -197,8 +200,14 @@ mod tests {
         let result = storage.load();
 
         // Doit retourner une erreur propre (Err), pas un panic!
-        assert!(result.is_err(), "La corruption doit être gérée et retourner une erreur");
+        assert!(
+            result.is_err(),
+            "La corruption doit être gérée et retourner une erreur"
+        );
         let err_msg = result.unwrap_err().to_string();
-        assert!(err_msg.contains("Échec du déchiffrement") || err_msg.contains("Fichier de tokens corrompu"));
+        assert!(
+            err_msg.contains("Échec du déchiffrement")
+                || err_msg.contains("Fichier de tokens corrompu")
+        );
     }
 }

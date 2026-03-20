@@ -1,9 +1,9 @@
-use anyhow::{Context, Result};
 use crate::auth::oauth2::{GoogleTokens, OAuthAppCredentials};
 use crate::auth::storage::{EncryptedFileStorage, TokenStorage};
+use anyhow::{Context, Result};
 use oauth2::basic::BasicClient;
 use oauth2::reqwest::async_http_client;
-use oauth2::{AuthUrl, ClientId, ClientSecret, TokenResponse, TokenUrl, RefreshToken};
+use oauth2::{AuthUrl, ClientId, ClientSecret, RefreshToken, TokenResponse, TokenUrl};
 use serde::Deserialize;
 
 #[derive(Deserialize)]
@@ -33,7 +33,8 @@ impl GoogleAuth {
         Self {
             // On utilise les mêmes identifiants que dans storage.rs
             // Unexpect explicite si la clé de chiffrement est introuvable
-            storage: EncryptedFileStorage::new().expect("Impossible d'initialiser le chiffrement (CLIENT_SECRET manquant)"),
+            storage: EncryptedFileStorage::new()
+                .expect("Impossible d'initialiser le chiffrement (CLIENT_SECRET manquant)"),
             creds: OAuthAppCredentials::default(),
         }
     }
@@ -45,7 +46,9 @@ impl GoogleAuth {
 
     /// La fonction "Pro" pour le démarrage : Charge, Rafraîchit et Valide
     pub async fn get_valid_token(&self) -> Result<String> {
-        let tokens = self.storage.load()?
+        let tokens = self
+            .storage
+            .load()?
             .context("Aucun jeton trouvé. Veuillez vous connecter dans les paramètres.")?;
 
         let now = chrono::Utc::now().timestamp();
@@ -72,11 +75,15 @@ impl GoogleAuth {
 
         let new_tokens = GoogleTokens {
             access_token: token_response.access_token().secret().clone(),
-            refresh_token: token_response.refresh_token()
+            refresh_token: token_response
+                .refresh_token()
                 .map(|r| r.secret().clone())
                 .unwrap_or(tokens.refresh_token), // On garde l'ancien si pas de nouveau
-            expires_at: chrono::Utc::now().timestamp() +
-                token_response.expires_in().map(|d| d.as_secs()).unwrap_or(3599) as i64,
+            expires_at: chrono::Utc::now().timestamp()
+                + token_response
+                    .expires_in()
+                    .map(|d| d.as_secs())
+                    .unwrap_or(3599) as i64,
             scope: tokens.scope.clone(),
         };
 
@@ -91,7 +98,8 @@ impl GoogleAuth {
             let client = reqwest::Client::new();
 
             // Envoyer le refresh_token révoque toute la chaîne (y compris l'access_token)
-            let res = client.post("https://oauth2.googleapis.com/revoke")
+            let res = client
+                .post("https://oauth2.googleapis.com/revoke")
                 .header("Content-Type", "application/x-www-form-urlencoded")
                 .body(format!("token={}", tokens.refresh_token))
                 .send()
@@ -105,14 +113,19 @@ impl GoogleAuth {
 
         // 2. Suppression systématique du fichier local tokens.enc
         tracing::info!("Suppression du fichier chiffré local...");
-        self.storage.clear().context("Erreur lors de la suppression du fichier de tokens")?;
+        self.storage
+            .clear()
+            .context("Erreur lors de la suppression du fichier de tokens")?;
 
         Ok(())
     }
 
     /// Méthode utilitaire simple pour vérifier si on a un token local (sans faire d'appel réseau)
     pub fn is_locally_connected(&self) -> bool {
-        self.storage.load().map(|opt| opt.is_some()).unwrap_or(false)
+        self.storage
+            .load()
+            .map(|opt| opt.is_some())
+            .unwrap_or(false)
     }
 
     /// Interroge l'API Google Drive pour récupérer l'adresse email de l'utilisateur
@@ -120,13 +133,16 @@ impl GoogleAuth {
         let token = self.get_valid_token().await?;
         let client = reqwest::Client::new();
 
-        let res = client.get("https://www.googleapis.com/drive/v3/about?fields=user")
+        let res = client
+            .get("https://www.googleapis.com/drive/v3/about?fields=user")
             .bearer_auth(token)
             .send()
             .await?
             .error_for_status()?; // Déclenche une erreur si le statut HTTP n'est pas 2xx
 
-        let about: DriveAbout = res.json().await
+        let about: DriveAbout = res
+            .json()
+            .await
             .context("Erreur lors de la lecture du profil utilisateur")?;
 
         Ok(about.user.email_address)

@@ -91,13 +91,23 @@ pub struct ChangesPage {
 
 #[derive(Debug, Clone)]
 pub enum Change {
-    Modified { drive_id: String, name: String, parent_id: String },
-    Deleted { drive_id: String },
+    Modified {
+        drive_id: String,
+        name: String,
+        parent_id: String,
+    },
+    Deleted {
+        drive_id: String,
+    },
 }
 
 #[derive(Debug, Clone)]
 pub enum HealthStatus {
-    Ok { email: String, quota_used: u64, quota_total: u64 },
+    Ok {
+        email: String,
+        quota_used: u64,
+        quota_total: u64,
+    },
     AuthExpired,
     Unreachable,
 }

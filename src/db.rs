@@ -5,9 +5,9 @@
 //! - `path_cache` pour réduire les requêtes HTTP (Phase 3).
 //! - `offline_queue` pour la gestion hors-ligne (Phase 6).
 
-use std::path::Path;
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
+use std::path::Path;
 use tracing::{info, warn};
 
 // ── Structures de données ─────────────────────────────────────────────────────
@@ -51,7 +51,9 @@ impl Database {
             .with_context(|| format!("cannot open SQLite db at {}", path.display()))?;
 
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")?;
-        Ok(Self { inner: std::sync::Arc::new(std::sync::Mutex::new(conn)) })
+        Ok(Self {
+            inner: std::sync::Arc::new(std::sync::Mutex::new(conn)),
+        })
     }
 
     // ── Migration & Initialisation (Phase 1) ──────────────────────────────────
@@ -74,7 +76,8 @@ impl Database {
             return Ok(if has_file_index { 1 } else { 0 });
         }
 
-        let version: i32 = conn.query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))?;
+        let version: i32 =
+            conn.query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))?;
         Ok(version)
     }
 
@@ -82,7 +85,10 @@ impl Database {
         let version = self.schema_version()?;
 
         if version == 0 {
-            let mut conn = self.inner.lock().map_err(|_| anyhow::anyhow!("SQLite mutex poisoned"))?;
+            let mut conn = self
+                .inner
+                .lock()
+                .map_err(|_| anyhow::anyhow!("SQLite mutex poisoned"))?;
             let tx = conn.transaction()?;
 
             tx.execute_batch(
@@ -112,13 +118,15 @@ impl Database {
                     relative_path TEXT NOT NULL,
                     extra         TEXT,
                     created_at    INTEGER NOT NULL
-                );"
+                );",
             )?;
             tx.commit()?;
             info!("Nouvelle base de données initialisée (Schéma V2)");
-
         } else if version == 1 {
-            let mut conn = self.inner.lock().map_err(|_| anyhow::anyhow!("SQLite mutex poisoned"))?;
+            let mut conn = self
+                .inner
+                .lock()
+                .map_err(|_| anyhow::anyhow!("SQLite mutex poisoned"))?;
             let tx = conn.transaction()?;
 
             tx.execute_batch(
@@ -141,13 +149,15 @@ impl Database {
                     relative_path TEXT NOT NULL,
                     extra         TEXT,
                     created_at    INTEGER NOT NULL
-                );"
+                );",
             )?;
             tx.commit()?;
             info!("Base de données migrée de V1 vers V2 avec succès");
-
         } else if version > 2 {
-            warn!("La version du schéma ({}) est supérieure à celle supportée par ce binaire (2).", version);
+            warn!(
+                "La version du schéma ({}) est supérieure à celle supportée par ce binaire (2).",
+                version
+            );
         }
 
         Ok(())
@@ -158,9 +168,15 @@ impl Database {
     pub fn get(&self, path: &str) -> Result<Option<FileEntry>> {
         let conn = self.lock()?;
         let mut stmt = conn.prepare("SELECT path, hash, mtime FROM file_index WHERE path = ?1")?;
-        let entry = stmt.query_row(params![path], |row| {
-            Ok(FileEntry { path: row.get(0)?, hash: row.get(1)?, mtime: row.get(2)? })
-        }).optional()?;
+        let entry = stmt
+            .query_row(params![path], |row| {
+                Ok(FileEntry {
+                    path: row.get(0)?,
+                    hash: row.get(1)?,
+                    mtime: row.get(2)?,
+                })
+            })
+            .optional()?;
         Ok(entry)
     }
 
@@ -192,7 +208,13 @@ impl Database {
                 parent_id=excluded.parent_id,
                 is_folder=excluded.is_folder,
                 updated_at=excluded.updated_at",
-            params![entry.relative_path, entry.drive_id, entry.parent_id, entry.is_folder as i32, entry.updated_at],
+            params![
+                entry.relative_path,
+                entry.drive_id,
+                entry.parent_id,
+                entry.is_folder as i32,
+                entry.updated_at
+            ],
         )?;
         Ok(())
     }
@@ -200,21 +222,26 @@ impl Database {
     pub fn get_path_cache(&self, path: &str) -> Result<Option<PathCacheEntry>> {
         let conn = self.lock()?;
         let mut stmt = conn.prepare("SELECT relative_path, drive_id, parent_id, is_folder, updated_at FROM path_cache WHERE relative_path = ?1")?;
-        let entry = stmt.query_row(params![path], |row| {
-            Ok(PathCacheEntry {
-                relative_path: row.get(0)?,
-                drive_id: row.get(1)?,
-                parent_id: row.get(2)?,
-                is_folder: row.get::<_, i32>(3)? != 0,
-                updated_at: row.get(4)?,
+        let entry = stmt
+            .query_row(params![path], |row| {
+                Ok(PathCacheEntry {
+                    relative_path: row.get(0)?,
+                    drive_id: row.get(1)?,
+                    parent_id: row.get(2)?,
+                    is_folder: row.get::<_, i32>(3)? != 0,
+                    updated_at: row.get(4)?,
+                })
             })
-        }).optional()?;
+            .optional()?;
         Ok(entry)
     }
 
     pub fn delete_path_cache(&self, path: &str) -> Result<()> {
         let conn = self.lock()?;
-        conn.execute("DELETE FROM path_cache WHERE relative_path = ?1", params![path])?;
+        conn.execute(
+            "DELETE FROM path_cache WHERE relative_path = ?1",
+            params![path],
+        )?;
         Ok(())
     }
 
@@ -222,7 +249,9 @@ impl Database {
 
     pub fn push_offline_task(&self, action: &str, path: &str, extra: Option<&str>) -> Result<i64> {
         let conn = self.lock()?;
-        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs() as i64;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_secs() as i64;
         conn.execute(
             "INSERT INTO offline_queue (action, relative_path, extra, created_at) VALUES (?1, ?2, ?3, ?4)",
             params![action, path, extra, now],
@@ -278,7 +307,10 @@ impl Database {
 
     pub fn rename(&self, from: &str, to: &str) -> Result<()> {
         let conn = self.lock()?;
-        conn.execute("UPDATE file_index SET path = ?1 WHERE path = ?2", params![to, from])?;
+        conn.execute(
+            "UPDATE file_index SET path = ?1 WHERE path = ?2",
+            params![to, from],
+        )?;
         Ok(())
     }
 
@@ -331,7 +363,9 @@ impl Database {
 
     // ── Interne ───────────────────────────────────────────────────────────────
     fn lock(&self) -> Result<std::sync::MutexGuard<'_, Connection>> {
-        self.inner.lock().map_err(|_| anyhow::anyhow!("SQLite mutex poisoned"))
+        self.inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("SQLite mutex poisoned"))
     }
 }
 
@@ -366,7 +400,9 @@ mod tests {
             CREATE TABLE dir_index (path TEXT PRIMARY KEY);
         ").unwrap();
 
-        let db = Database { inner: std::sync::Arc::new(std::sync::Mutex::new(conn)) };
+        let db = Database {
+            inner: std::sync::Arc::new(std::sync::Mutex::new(conn)),
+        };
         assert_eq!(db.schema_version().unwrap(), 1); // Détecté comme V1
 
         db.init_and_migrate().unwrap();
@@ -403,7 +439,8 @@ mod tests {
     fn test_offline_queue_fifo() {
         let db = fresh_db();
         db.push_offline_task("sync", "file1.txt", None).unwrap();
-        db.push_offline_task("rename", "file2.txt", Some("file1.txt")).unwrap();
+        db.push_offline_task("rename", "file2.txt", Some("file1.txt"))
+            .unwrap();
 
         let tasks = db.get_offline_tasks().unwrap();
         assert_eq!(tasks.len(), 2);

@@ -1,14 +1,14 @@
+pub mod bandwidth;
+pub mod integrity;
+pub mod offline;
+pub mod rate_limiter;
 pub mod scan;
 pub mod watcher;
 pub mod worker;
-pub mod bandwidth;
-pub mod rate_limiter;
-pub mod integrity;
-pub mod offline;
 
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use tokio::sync::{mpsc, Semaphore};
@@ -19,7 +19,7 @@ use crate::config::AppConfig;
 use crate::db::Database;
 use crate::engine::bandwidth::ProgressTracker;
 use crate::ignore::IgnoreMatcher;
-use crate::remote::{RemoteProvider, path_cache::PathCache, HealthStatus};
+use crate::remote::{path_cache::PathCache, HealthStatus, RemoteProvider};
 
 // ── Types publics ─────────────────────────────────────────────────────────────
 
@@ -44,7 +44,9 @@ pub enum EngineStatus {
         current: String,
     },
     SyncProgress(bandwidth::ProgressSnapshot),
-    Syncing { active: usize },
+    Syncing {
+        active: usize,
+    },
     Paused,
     Error(String),
     Stopped,
@@ -97,7 +99,8 @@ impl SyncEngine {
             shutdown.clone(),
         )?);
 
-        self.run_with_provider(provider, path_cache, db, shutdown, cmd_rx, status_tx).await
+        self.run_with_provider(provider, path_cache, db, shutdown, cmd_rx, status_tx)
+            .await
     }
 
     async fn run_with_provider(
@@ -121,7 +124,17 @@ impl SyncEngine {
 
         {
             let _ = status_tx.send(EngineStatus::Syncing { active: 0 });
-            let scan = scan::run(&self.cfg, &db, &ignore, &provider, &path_cache, &task_tx, &shutdown, &status_tx, &tracker);
+            let scan = scan::run(
+                &self.cfg,
+                &db,
+                &ignore,
+                &provider,
+                &path_cache,
+                &task_tx,
+                &shutdown,
+                &status_tx,
+                &tracker,
+            );
             tokio::pin!(scan);
 
             loop {
@@ -180,18 +193,29 @@ impl SyncEngine {
 
         // On passe le drapeau et la DB au dispatcher
         spawn_debounced_dispatch(
-            watch_rx, task_tx_w, sd_w, self.cfg.advanced.debounce_ms,
-            tracker.clone(), is_offline.clone(), db.clone(), local_root.clone()
+            watch_rx,
+            task_tx_w,
+            sd_w,
+            self.cfg.advanced.debounce_ms,
+            tracker.clone(),
+            is_offline.clone(),
+            db.clone(),
+            local_root.clone(),
         );
 
         let sem = Arc::new(Semaphore::new(self.cfg.max_workers.max(1)));
         let active = Arc::new(AtomicUsize::new(0));
 
-        tokio::spawn(progress_publisher(tracker.clone(), status_tx.clone(), shutdown.clone()));
+        tokio::spawn(progress_publisher(
+            tracker.clone(),
+            status_tx.clone(),
+            shutdown.clone(),
+        ));
 
         // NOUVEAU : Le Tick de Santé (Health Check) toutes les 30s
         let mut health_tick = tokio::time::interval_at(
-            tokio::time::Instant::now() + std::time::Duration::from_secs(self.cfg.advanced.health_check_interval_secs),
+            tokio::time::Instant::now()
+                + std::time::Duration::from_secs(self.cfg.advanced.health_check_interval_secs),
             std::time::Duration::from_secs(self.cfg.advanced.health_check_interval_secs),
         );
 
@@ -334,13 +358,13 @@ impl SyncEngine {
                 _ = health_tick.tick() => {
                     match provider.check_health().await {
                         Ok(HealthStatus::Ok { .. }) => {
-                            // Si on était hors-ligne, on vient de récupérer Internet !
                             if is_offline.swap(false, Ordering::Relaxed) {
                                 info!("🌐 Connexion Internet rétablie !");
+                                crate::notif::connection_restored(&self.cfg);
                                 let _ = status_tx.send(EngineStatus::Idle);
 
-                                // On vide l'estomac SQLite vers les workers
-                                if let Err(e) = offline::flush_queue(&db, &task_tx).await {
+                                // CORRECTION : On passe le local_root au flush
+                                if let Err(e) = offline::flush_queue(&db, &task_tx, &self.cfg.sync_pairs[0].local_path).await {
                                     warn!("Erreur lors du flush de la file d'attente hors-ligne : {}", e);
                                 }
                             }
@@ -349,6 +373,8 @@ impl SyncEngine {
                             // On a perdu Internet
                             if !is_offline.swap(true, Ordering::Relaxed) {
                                 warn!("⚠️ Connexion perdue. Passage en mode SURVIE (Hors-Ligne).");
+
+                                crate::notif::connection_lost(&self.cfg);
                                 let _ = status_tx.send(EngineStatus::Error("Réseau indisponible (Mode Hors-ligne)".into()));
                             }
                         }
@@ -457,7 +483,7 @@ fn spawn_debounced_dispatch(
     local_root: PathBuf,
 ) {
     use std::collections::HashMap;
-    use tokio::time::{Duration, Instant, interval};
+    use tokio::time::{interval, Duration, Instant};
     use watcher::WatchEvent;
 
     tokio::spawn(async move {
@@ -491,7 +517,7 @@ fn spawn_debounced_dispatch(
                             let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
                             tracker.total_files.fetch_add(1, Ordering::Relaxed);
                             tracker.total_bytes.fetch_add(size, Ordering::Relaxed);
-                            let task = Task::SyncFile { path };
+                            let task = Task::SyncFile { path};
                             if task_tx.send(task).await.is_err() { return; }
                         }
                     }
@@ -600,11 +626,11 @@ pub(crate) async fn progress_publisher(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::AppConfig;
+    use std::path::PathBuf;
+    use tempfile::NamedTempFile;
     use tokio::sync::mpsc;
     use tokio_util::sync::CancellationToken;
-    use std::path::PathBuf;
-    use crate::config::AppConfig;
-    use tempfile::NamedTempFile;
 
     fn test_db() -> Database {
         let f = NamedTempFile::new().unwrap();
@@ -633,12 +659,21 @@ mod tests {
         let is_offline = Arc::new(AtomicBool::new(false));
 
         spawn_debounced_dispatch(
-            watch_rx, task_tx, shutdown.clone(), 0, tracker,
-            is_offline, test_db(), PathBuf::from("/")
+            watch_rx,
+            task_tx,
+            shutdown.clone(),
+            0,
+            tracker,
+            is_offline,
+            test_db(),
+            PathBuf::from("/"),
         );
 
         let start = tokio::time::Instant::now();
-        watch_tx.send(watcher::WatchEvent::Modified(PathBuf::from("zero.txt"))).await.unwrap();
+        watch_tx
+            .send(watcher::WatchEvent::Modified(PathBuf::from("zero.txt")))
+            .await
+            .unwrap();
         let _ = task_rx.recv().await.unwrap();
         let elapsed = start.elapsed().as_millis() as u64;
 
@@ -657,12 +692,21 @@ mod tests {
         let is_offline = Arc::new(AtomicBool::new(false));
 
         spawn_debounced_dispatch(
-            watch_rx, task_tx, shutdown.clone(), configured_debounce, tracker,
-            is_offline, test_db(), PathBuf::from("/")
+            watch_rx,
+            task_tx,
+            shutdown.clone(),
+            configured_debounce,
+            tracker,
+            is_offline,
+            test_db(),
+            PathBuf::from("/"),
         );
 
         let start = tokio::time::Instant::now();
-        watch_tx.send(watcher::WatchEvent::Modified(PathBuf::from("config.txt"))).await.unwrap();
+        watch_tx
+            .send(watcher::WatchEvent::Modified(PathBuf::from("config.txt")))
+            .await
+            .unwrap();
         let _ = task_rx.recv().await.unwrap();
         let elapsed = start.elapsed().as_millis() as u64;
 
@@ -675,10 +719,18 @@ mod tests {
         let shutdown = CancellationToken::new();
         let tracker = Arc::new(crate::engine::bandwidth::ProgressTracker::new());
 
-        tracker.total_files.store(10, std::sync::atomic::Ordering::Relaxed);
-        tracker.done_files.store(5, std::sync::atomic::Ordering::Relaxed);
+        tracker
+            .total_files
+            .store(10, std::sync::atomic::Ordering::Relaxed);
+        tracker
+            .done_files
+            .store(5, std::sync::atomic::Ordering::Relaxed);
 
-        tokio::spawn(super::progress_publisher(tracker.clone(), status_tx, shutdown.clone()));
+        tokio::spawn(super::progress_publisher(
+            tracker.clone(),
+            status_tx,
+            shutdown.clone(),
+        ));
 
         for _ in 0..1000 {
             tracker.record_bytes(1024);
@@ -689,7 +741,9 @@ mod tests {
 
         let mut count = 0;
         while let Ok(msg) = status_rx.try_recv() {
-            if let EngineStatus::SyncProgress(_) = msg { count += 1; }
+            if let EngineStatus::SyncProgress(_) = msg {
+                count += 1;
+            }
         }
 
         assert!(count >= 1);
@@ -702,16 +756,22 @@ mod tests {
         let (task_tx, mut task_rx) = mpsc::channel(10);
 
         // 1. Simuler le mode Survie : on ajoute des tâches dans la base hors-ligne
-        db.push_offline_task("sync", "fichier_train.txt", None).unwrap();
-        db.push_offline_task("delete", "vieux_brouillon.txt", None).unwrap();
-        db.push_offline_task("rename", "nouveau_nom.txt", Some("ancien_nom.txt")).unwrap();
+        db.push_offline_task("sync", "fichier_train.txt", None)
+            .unwrap();
+        db.push_offline_task("delete", "vieux_brouillon.txt", None)
+            .unwrap();
+        db.push_offline_task("rename", "nouveau_nom.txt", Some("ancien_nom.txt"))
+            .unwrap();
 
-        // 2. Simuler le retour de la connexion : on appelle le flush
-        super::offline::flush_queue(&db, &task_tx).await.unwrap();
+        // 2. Simuler le retour de la connexion : on appelle le flush avec un root local fictif
+        super::offline::flush_queue(&db, &task_tx, std::path::Path::new(""))
+            .await
+            .unwrap();
 
         // 3. Vérifier que les tâches ont bien été réinjectées dans le circuit principal
         let task1 = task_rx.recv().await.unwrap();
         match task1 {
+            // Plus de flag force ici !
             Task::SyncFile { path } => assert_eq!(path.to_string_lossy(), "fichier_train.txt"),
             _ => panic!("Tâche 1 inattendue"),
         }
@@ -733,6 +793,9 @@ mod tests {
 
         // 4. Vérifier que l'estomac SQLite est totalement vide après le traitement
         let remaining = db.get_offline_tasks().unwrap();
-        assert!(remaining.is_empty(), "La base de données devrait être vide après le flush");
+        assert!(
+            remaining.is_empty(),
+            "La base de données devrait être vide après le flush"
+        );
     }
 }

@@ -1,28 +1,38 @@
-use std::path::PathBuf;
-use tokio::sync::mpsc;
 use anyhow::Result;
+use std::path::Path;
+use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 use crate::db::Database;
 use crate::engine::Task;
 
 /// Vide la file d'attente hors-ligne et réinjecte les tâches dans le circuit principal
-pub(crate) async fn flush_queue(db: &Database, task_tx: &mpsc::Sender<Task>) -> Result<()> {
+pub(crate) async fn flush_queue(
+    db: &Database,
+    task_tx: &mpsc::Sender<Task>,
+    local_root: &Path,
+) -> Result<()> {
     let tasks = db.get_offline_tasks()?;
 
     if tasks.is_empty() {
         return Ok(());
     }
 
-    info!("🌐 Connexion rétablie ! Vidage de la file d'attente hors-ligne ({} tâches)...", tasks.len());
+    info!(
+        "🌐 Connexion rétablie ! Vidage de la file d'attente hors-ligne ({} tâches)...",
+        tasks.len()
+    );
 
     for ot in tasks {
         let task = match ot.action.as_str() {
-            "sync" => Task::SyncFile { path: PathBuf::from(&ot.relative_path) },
-            "delete" => Task::Delete(PathBuf::from(&ot.relative_path)),
+            // CORRECTION : On reconstruit le chemin absolu !
+            "sync" => Task::SyncFile {
+                path: local_root.join(&ot.relative_path),
+            },
+            "delete" => Task::Delete(local_root.join(&ot.relative_path)),
             "rename" => Task::Rename {
-                from: PathBuf::from(ot.extra.clone().unwrap_or_default()),
-                to: PathBuf::from(&ot.relative_path),
+                from: local_root.join(ot.extra.clone().unwrap_or_default()),
+                to: local_root.join(&ot.relative_path),
             },
             _ => {
                 warn!("Action hors-ligne inconnue : {}", ot.action);

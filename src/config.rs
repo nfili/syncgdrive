@@ -3,11 +3,11 @@
 //! Ce module gère le chargement, la validation et la sauvegarde de la
 //! configuration TOML. Il intègre la migration automatique depuis la V1.
 
-use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 use thiserror::Error;
-use tracing::{info};
+use tracing::info;
 
 // ── Valeurs par défaut (strictement selon 01_CONFIG_V2.md) ──────────────────
 
@@ -20,31 +20,69 @@ fn default_ignore_patterns() -> Vec<String> {
         "**/.idea/**".into(),
     ]
 }
-fn default_max_workers() -> usize { 4 }
-fn default_retry_attempts() -> u32 { 3 }
-fn default_initial_backoff_ms() -> u64 { 300 }
-fn default_max_backoff_ms() -> u64 { 8_000 }
-fn default_rescan_interval_min() -> u64 { 30 }
-fn default_provider() -> String { "GoogleDrive".into() }
-fn default_true() -> bool { true }
-fn default_debounce_ms() -> u64 { 500 }
-fn default_health_check_secs() -> u64 { 30 }
-fn default_max_concurrent_ls() -> usize { 8 }
-fn default_shutdown_timeout() -> u64 { 3 }
-fn default_log_retention() -> u64 { 7 }
-fn default_channel_capacity() -> usize { 1024 }
-fn default_notif_timeout() -> i32 { 6000 }
-fn default_resumable_threshold() -> u64 { 5_242_880 }
-fn default_api_rate_limit() -> u32 { 10 }
-fn default_delete_mode() -> String { "trash".into() }
-fn default_symlink_mode() -> String { "ignore".into() }
+fn default_max_workers() -> usize {
+    4
+}
+fn default_retry_attempts() -> u32 {
+    3
+}
+fn default_initial_backoff_ms() -> u64 {
+    300
+}
+fn default_max_backoff_ms() -> u64 {
+    8_000
+}
+fn default_rescan_interval_min() -> u64 {
+    30
+}
+fn default_provider() -> String {
+    "GoogleDrive".into()
+}
+fn default_true() -> bool {
+    true
+}
+fn default_debounce_ms() -> u64 {
+    500
+}
+fn default_health_check_secs() -> u64 {
+    30
+}
+fn default_max_concurrent_ls() -> usize {
+    8
+}
+fn default_shutdown_timeout() -> u64 {
+    3
+}
+fn default_log_retention() -> u64 {
+    7
+}
+fn default_channel_capacity() -> usize {
+    1024
+}
+fn default_notif_timeout() -> i32 {
+    6000
+}
+fn default_resumable_threshold() -> u64 {
+    5_242_880
+}
+fn default_api_rate_limit() -> u32 {
+    10
+}
+fn default_delete_mode() -> String {
+    "trash".into()
+}
+fn default_symlink_mode() -> String {
+    "ignore".into()
+}
 fn default_api_base() -> String {
     "https://www.googleapis.com/drive/v3".into()
 }
 fn default_upload_base() -> String {
     "https://www.googleapis.com/upload/drive/v3".into()
 }
-fn default_chunk_threshold() -> u64 { 5 * 1024 * 1024 }
+fn default_chunk_threshold() -> u64 {
+    5 * 1024 * 1024
+}
 // ── Structures ────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -125,13 +163,19 @@ impl Default for AdvancedConfig {
 impl AdvancedConfig {
     pub fn validate(&self) -> Result<(), ConfigError> {
         if self.engine_channel_capacity == 0 {
-            return Err(ConfigError::InvalidAdvanced("engine_channel_capacity doit être > 0".into()));
+            return Err(ConfigError::InvalidAdvanced(
+                "engine_channel_capacity doit être > 0".into(),
+            ));
         }
         if self.max_concurrent_ls == 0 {
-            return Err(ConfigError::InvalidAdvanced("max_concurrent_ls doit être > 0".into()));
+            return Err(ConfigError::InvalidAdvanced(
+                "max_concurrent_ls doit être > 0".into(),
+            ));
         }
         if self.api_rate_limit_rps == 0 {
-            return Err(ConfigError::InvalidAdvanced("api_rate_limit_rps doit être > 0".into()));
+            return Err(ConfigError::InvalidAdvanced(
+                "api_rate_limit_rps doit être > 0".into(),
+            ));
         }
         Ok(())
     }
@@ -227,7 +271,10 @@ impl AppConfig {
             std::fs::write(&backup_path, &raw)
                 .with_context(|| format!("Échec création backup V1: {}", backup_path.display()))?;
 
-            info!("Migration config V1 → V2 effectuée. Backup créé dans {:?}", backup_path);
+            info!(
+                "Migration config V1 → V2 effectuée. Backup créé dans {:?}",
+                backup_path
+            );
 
             // Sauvegarde du nouveau format V2
             cfg.save()?;
@@ -239,11 +286,11 @@ impl AppConfig {
 
     /// Fonction pure pour tester la logique de parsing et migration sans IO.
     pub fn parse_and_migrate(raw_toml: &str) -> Result<(Self, bool)> {
-        let toml_val: toml::Value = toml::from_str(raw_toml)
-            .context("Fichier TOML invalide")?;
+        let toml_val: toml::Value = toml::from_str(raw_toml).context("Fichier TOML invalide")?;
 
         // Vérification de la présence de paires V2
-        let has_v2_pairs = toml_val.get("sync_pairs")
+        let has_v2_pairs = toml_val
+            .get("sync_pairs")
             .and_then(|v| v.as_array())
             .map(|arr| !arr.is_empty())
             .unwrap_or(false);
@@ -360,14 +407,20 @@ mod tests {
         let (cfg, migrated) = AppConfig::parse_and_migrate(toml).unwrap();
         assert!(migrated);
         assert_eq!(cfg.sync_pairs.len(), 1);
-        assert_eq!(cfg.sync_pairs[0].local_path, PathBuf::from("/home/user/OldV1"));
+        assert_eq!(
+            cfg.sync_pairs[0].local_path,
+            PathBuf::from("/home/user/OldV1")
+        );
         assert_eq!(cfg.max_workers, 2); // Les autres champs sont préservés
     }
 
     #[test]
     fn test_validate_empty_pairs() {
         let cfg = AppConfig::default();
-        assert!(matches!(cfg.validate(), Err(ConfigError::NoPairsConfigured)));
+        assert!(matches!(
+            cfg.validate(),
+            Err(ConfigError::NoPairsConfigured)
+        ));
     }
 
     #[test]
@@ -395,7 +448,10 @@ mod tests {
             active: true, // Actif ! Ça doit planter
             ignore_patterns: vec![],
         });
-        assert!(matches!(cfg.validate(), Err(ConfigError::PairLocalMissing(_, _))));
+        assert!(matches!(
+            cfg.validate(),
+            Err(ConfigError::PairLocalMissing(_, _))
+        ));
     }
 
     #[test]
@@ -411,7 +467,10 @@ mod tests {
     fn test_advanced_defaults_are_sane() {
         let cfg = AppConfig::default();
         // La configuration par défaut ne doit renvoyer aucune erreur
-        assert!(cfg.advanced.validate().is_ok(), "Les valeurs par défaut d'AdvancedConfig doivent être valides");
+        assert!(
+            cfg.advanced.validate().is_ok(),
+            "Les valeurs par défaut d'AdvancedConfig doivent être valides"
+        );
     }
 
     #[test]

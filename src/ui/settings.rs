@@ -18,7 +18,6 @@ use crate::engine::EngineCommand;
 /// **Pause/Resume** : envoie `Pause` à l'ouverture et `Resume` à la fermeture
 /// (que ce soit via Enregistrer ou la croix ✕).
 pub fn run_standalone(cmd_tx: tokio::sync::mpsc::Sender<EngineCommand>) -> Result<()> {
-
     // Pause immédiate : le moteur arrête de traiter les tasks.
     let _ = cmd_tx.try_send(EngineCommand::Pause);
 
@@ -99,16 +98,16 @@ where
     let local_row = libadwaita::EntryRow::builder()
         .title("Dossier local")
         .text(
-            cfg.sync_pairs.first()
+            cfg.sync_pairs
+                .first()
                 .map(|p| p.local_path.to_string_lossy().into_owned())
                 .unwrap_or_default()
-                .as_str() // <--- On force explicitement en &str
-        ).build();
+                .as_str(), // <--- On force explicitement en &str
+        )
+        .build();
 
     // Icône de validation live ✅/❌
-    let local_status = gtk4::Image::builder()
-        .valign(gtk4::Align::Center)
-        .build();
+    let local_status = gtk4::Image::builder().valign(gtk4::Align::Center).build();
     local_row.add_suffix(&local_status);
 
     // Bouton parcourir pour le dossier local
@@ -142,16 +141,16 @@ where
     let remote_row = libadwaita::EntryRow::builder()
         .title("URL distante (ex: gdrive:/MonDrive/Backup)")
         .text(
-            cfg.sync_pairs.first()
+            cfg.sync_pairs
+                .first()
                 .map(|p| p.remote_folder_id.clone()) // <--- Correction : on pointe bien sur le remote_folder_id !
                 .unwrap_or_default()
-                .as_str() // <--- On force explicitement en &str
-        ).build();
+                .as_str(), // <--- On force explicitement en &str
+        )
+        .build();
 
     // Icône de validation live ✅/❌
-    let remote_status = gtk4::Image::builder()
-        .valign(gtk4::Align::Center)
-        .build();
+    let remote_status = gtk4::Image::builder().valign(gtk4::Align::Center).build();
     remote_row.add_suffix(&remote_status);
     // --- Getsion de AuthManager -------------------------------
     let auth_manager = crate::auth::GoogleAuth::new();
@@ -185,7 +184,10 @@ where
                 let rt = tokio::runtime::Runtime::new().unwrap();
                 let res = rt.block_on(async {
                     let local_auth = crate::auth::GoogleAuth::new();
-                    let email = local_auth.get_user_email().await.unwrap_or_else(|_| "Inconnu".into());
+                    let email = local_auth
+                        .get_user_email()
+                        .await
+                        .unwrap_or_else(|_| "Inconnu".into());
                     let expiry = local_auth.get_token_expiration_date();
                     (email, expiry)
                 });
@@ -193,7 +195,10 @@ where
             });
 
             if let Ok((email, expiry)) = rx.await {
-                auth_row_init.set_subtitle(&format!("✅ Compte lié : {}\nToken valide jusqu'au {}", email, expiry));
+                auth_row_init.set_subtitle(&format!(
+                    "✅ Compte lié : {}\nToken valide jusqu'au {}",
+                    email, expiry
+                ));
             }
         });
     } else {
@@ -258,7 +263,8 @@ where
                 let (tx, rx) = tokio::sync::oneshot::channel();
 
                 std::thread::spawn(move || {
-                    let rt = tokio::runtime::Runtime::new().expect("Erreur runtime Tokio temporaire");
+                    let rt =
+                        tokio::runtime::Runtime::new().expect("Erreur runtime Tokio temporaire");
                     let res = rt.block_on(async {
                         let creds = crate::auth::OAuthAppCredentials::default();
                         crate::auth::oauth2::authenticate(&creds).await
@@ -266,7 +272,9 @@ where
                     let _ = tx.send(res);
                 });
 
-                let res = rx.await.unwrap_or_else(|_| Err(anyhow::anyhow!("Le thread d'authentification a planté")));
+                let res = rx.await.unwrap_or_else(|_| {
+                    Err(anyhow::anyhow!("Le thread d'authentification a planté"))
+                });
                 btn_async.set_sensitive(true);
 
                 match res {
@@ -285,7 +293,10 @@ where
                                     let rt = tokio::runtime::Runtime::new().unwrap();
                                     let info = rt.block_on(async {
                                         let auth_info = crate::auth::GoogleAuth::new();
-                                        let email = auth_info.get_user_email().await.unwrap_or_else(|_| "Inconnu".into());
+                                        let email = auth_info
+                                            .get_user_email()
+                                            .await
+                                            .unwrap_or_else(|_| "Inconnu".into());
                                         let expiry = auth_info.get_token_expiration_date();
                                         (email, expiry)
                                     });
@@ -293,7 +304,10 @@ where
                                 });
 
                                 if let Ok((email, expiry)) = rx_info.await {
-                                    auth_row_success.set_subtitle(&format!("✅ Compte lié : {}\nToken valide jusqu'au {}", email, expiry));
+                                    auth_row_success.set_subtitle(&format!(
+                                        "✅ Compte lié : {}\nToken valide jusqu'au {}",
+                                        email, expiry
+                                    ));
                                     btn_success.set_label("Révoquer");
                                     btn_success.remove_css_class("suggested-action");
                                     btn_success.add_css_class("destructive-action");
@@ -403,7 +417,12 @@ where
 
     let workers_row = libadwaita::SpinRow::new(
         Some(&gtk4::Adjustment::new(
-            cfg.max_workers as f64, 1.0, 16.0, 1.0, 1.0, 0.0,
+            cfg.max_workers as f64,
+            1.0,
+            16.0,
+            1.0,
+            1.0,
+            0.0,
         )),
         1.0,
         0,
@@ -564,7 +583,14 @@ fn is_remote_valid(text: &str) -> bool {
     if text.is_empty() {
         return false;
     }
-    static SUPPORTED: &[&str] = &["gdrive://", "gdrive:/", "smb://", "sftp://", "webdav://", "ftp://"];
+    static SUPPORTED: &[&str] = &[
+        "gdrive://",
+        "gdrive:/",
+        "smb://",
+        "sftp://",
+        "webdav://",
+        "ftp://",
+    ];
     SUPPORTED.iter().any(|p| text.starts_with(p))
 }
 
@@ -592,7 +618,9 @@ fn update_remote_status(row: &libadwaita::EntryRow, icon: &gtk4::Image) {
         icon.set_tooltip_text(Some("Protocole reconnu"));
     } else {
         icon.set_icon_name(Some("dialog-error-symbolic"));
-        icon.set_tooltip_text(Some("Protocole invalide (gdrive:/, smb://, sftp://, webdav://, ftp://)"));
+        icon.set_tooltip_text(Some(
+            "Protocole invalide (gdrive:/, smb://, sftp://, webdav://, ftp://)",
+        ));
     }
 }
 
@@ -612,9 +640,7 @@ fn update_save_sensitivity(
 
 /// Ajoute une ligne dans la ListBox avec le pattern et un bouton supprimer.
 fn append_ignore_row(list: &gtk4::ListBox, pattern: &str) {
-    let row = libadwaita::ActionRow::builder()
-        .title(pattern)
-        .build();
+    let row = libadwaita::ActionRow::builder().title(pattern).build();
 
     let btn_del = gtk4::Button::builder()
         .icon_name("edit-delete-symbolic")
@@ -639,7 +665,9 @@ fn collect_patterns(list: &gtk4::ListBox) -> Vec<String> {
     let mut patterns = Vec::new();
     let mut idx = 0;
     loop {
-        let Some(row) = list.row_at_index(idx) else { break };
+        let Some(row) = list.row_at_index(idx) else {
+            break;
+        };
         if let Some(action_row) = row.downcast_ref::<libadwaita::ActionRow>() {
             let t = action_row.title().to_string();
             if !t.is_empty() {
@@ -682,7 +710,9 @@ fn browse_exclude(
             let root = lr2.text().to_string();
             for i in 0..items.n_items() {
                 let Some(obj) = items.item(i) else { continue };
-                let Ok(file) = obj.downcast::<gtk4::gio::File>() else { continue };
+                let Ok(file) = obj.downcast::<gtk4::gio::File>() else {
+                    continue;
+                };
                 if let Some(path) = file.path() {
                     let pattern = path_to_glob(&root, &path);
                     if !pattern.is_empty() {

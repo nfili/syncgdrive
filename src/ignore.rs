@@ -24,8 +24,8 @@
 
 use std::path::Path;
 
-use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use anyhow::Result;
+use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 
 /// Matcher compilé de patterns glob pour le filtrage des fichiers.
 ///
@@ -66,7 +66,9 @@ impl IgnoreMatcher {
                 .map_err(|e| anyhow::anyhow!("invalid glob pattern '{p}': {e}"))?;
             builder.add(glob);
         }
-        Ok(Self { set: builder.build()? })
+        Ok(Self {
+            set: builder.build()?,
+        })
     }
 
     /// Retourne `true` si `path` correspond à l'un des patterns d'exclusion.
@@ -104,22 +106,21 @@ mod tests {
         let dir = std::env::temp_dir().join("syncgdrive_test_ignore_dir");
         fs::create_dir_all(&dir).unwrap();
 
-        let m = IgnoreMatcher::from_patterns(&[
-            "**/syncgdrive_test_ignore_dir/**".to_string(),
-        ]).unwrap();
+        let m = IgnoreMatcher::from_patterns(&["**/syncgdrive_test_ignore_dir/**".to_string()])
+            .unwrap();
 
         assert!(m.is_ignored(&dir), "directory itself should be ignored");
-        assert!(m.is_ignored(&dir.join("some_file.rs")),
-            "file inside ignored dir should be ignored");
+        assert!(
+            m.is_ignored(&dir.join("some_file.rs")),
+            "file inside ignored dir should be ignored"
+        );
 
         fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn file_outside_ignored_dir_not_affected() {
-        let m = IgnoreMatcher::from_patterns(&[
-            "**/target/**".to_string(),
-        ]).unwrap();
+        let m = IgnoreMatcher::from_patterns(&["**/target/**".to_string()]).unwrap();
 
         let p = Path::new("/home/user/project/src/main.rs");
         assert!(!m.is_ignored(p));
@@ -131,7 +132,8 @@ mod tests {
             "**/target/**".into(),
             "**/.git/**".into(),
             "**/node_modules/**".into(),
-        ]).unwrap();
+        ])
+        .unwrap();
 
         assert!(m.is_ignored(Path::new("/proj/target/debug/bin")));
         assert!(m.is_ignored(Path::new("/proj/.git/config")));
@@ -147,21 +149,16 @@ mod tests {
 
     #[test]
     fn deeply_nested_match() {
-        let m = IgnoreMatcher::from_patterns(&[
-            "**/.git/**".into(),
-        ]).unwrap();
+        let m = IgnoreMatcher::from_patterns(&["**/.git/**".into()]).unwrap();
 
         assert!(m.is_ignored(Path::new("/a/b/c/.git/objects/pack/abc")));
     }
 
     #[test]
     fn extension_pattern() {
-        let m = IgnoreMatcher::from_patterns(&[
-            "**/*.log".into(),
-        ]).unwrap();
+        let m = IgnoreMatcher::from_patterns(&["**/*.log".into()]).unwrap();
 
         assert!(m.is_ignored(Path::new("/var/log/app.log")));
         assert!(!m.is_ignored(Path::new("/var/log/app.txt")));
     }
 }
-

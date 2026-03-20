@@ -1,12 +1,15 @@
-use std::path::Path;
-use anyhow::Result;
-use sha2::{Digest, Sha256};
 use crate::remote::UploadResult;
+use anyhow::Result;
+use md5::{Digest, Md5};
+use std::path::Path;
 
 #[derive(Debug, PartialEq)]
 pub enum IntegrityResult {
     Ok,
-    Mismatch { local_md5: String, remote_md5: String },
+    Mismatch {
+        local_md5: String,
+        remote_md5: String,
+    },
 }
 
 /// Calcule le SHA-256 local et le compare avec celui retourné par Google Drive
@@ -33,7 +36,7 @@ async fn compute_hash(path: &Path) -> Result<String> {
     // Note: Si tu utilises MD5 côté Google Drive, il faut utiliser la crate `md-5` ici.
     // Si Google te renvoie bien le hash de ton choix, garde sha256.
     let data = tokio::fs::read(path).await?;
-    let mut h = Sha256::new();
+    let mut h = Md5::new();
     h.update(&data);
     Ok(format!("{:x}", h.finalize()))
 }
@@ -64,7 +67,10 @@ mod tests {
 
         // 4. On s'attend à ce que le bouclier détecte le Mismatch
         match result {
-            IntegrityResult::Mismatch { local_md5, remote_md5 } => {
+            IntegrityResult::Mismatch {
+                local_md5,
+                remote_md5,
+            } => {
                 assert_ne!(local_md5, remote_md5, "Les hashs doivent être différents");
                 assert_eq!(remote_md5, "mauvais_hash_12345");
                 // Le local_md5 sera le vrai SHA-256 calculé de notre phrase
@@ -89,6 +95,10 @@ mod tests {
         };
 
         let result = verify_upload(local_path, &good_upload).await.unwrap();
-        assert_eq!(result, IntegrityResult::Ok, "Le fichier intact doit être validé");
+        assert_eq!(
+            result,
+            IntegrityResult::Ok,
+            "Le fichier intact doit être validé"
+        );
     }
 }

@@ -85,7 +85,10 @@ impl PathCache {
 
     /// `test_resolve_nested_path` : Utile pour le Mkdir.
     /// Pour "a/b/c", retourne le chemin le plus profond connu et son ID.
-    pub async fn resolve_deepest_known_parent(&self, relative_path: &str) -> Option<(String, CacheEntry)> {
+    pub async fn resolve_deepest_known_parent(
+        &self,
+        relative_path: &str,
+    ) -> Option<(String, CacheEntry)> {
         let map = self.entries.read().await;
         let path = std::path::Path::new(relative_path);
 
@@ -105,7 +108,7 @@ impl PathCache {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::remote::{RemoteIndex, RemoteDir, RemoteFile};
+    use crate::remote::{RemoteDir, RemoteFile, RemoteIndex};
 
     #[tokio::test]
     async fn test_lookup_existing_and_missing() {
@@ -119,7 +122,10 @@ mod tests {
 
         // test_lookup_missing
         let missing = cache.lookup("inconnu.txt").await;
-        assert!(missing.is_none(), "Une entrée inexistante doit retourner None");
+        assert!(
+            missing.is_none(),
+            "Une entrée inexistante doit retourner None"
+        );
     }
 
     #[tokio::test]
@@ -127,32 +133,34 @@ mod tests {
         let cache = PathCache::new();
 
         let index = RemoteIndex {
-            dirs: vec![
-                RemoteDir {
-                    relative_path: "dossierA".into(),
-                    drive_id: "dir_A_id".into(),
-                    parent_id: "root".into(),
-                }
-            ],
-            files: vec![
-                RemoteFile {
-                    relative_path: "dossierA/fichier.txt".into(),
-                    drive_id: "file_1_id".into(),
-                    parent_id: "dir_A_id".into(),
-                    md5: "hash_md5".into(),
-                    size: 1024,
-                    modified_time: 1600000000,
-                }
-            ]
+            dirs: vec![RemoteDir {
+                relative_path: "dossierA".into(),
+                drive_id: "dir_A_id".into(),
+                parent_id: "root".into(),
+            }],
+            files: vec![RemoteFile {
+                relative_path: "dossierA/fichier.txt".into(),
+                drive_id: "file_1_id".into(),
+                parent_id: "dir_A_id".into(),
+                md5: "hash_md5".into(),
+                size: 1024,
+                modified_time: 1600000000,
+            }],
         };
 
         cache.rebuild_from_index(&index).await;
 
         // Vérification de la cohérence du cache
-        let dir_lookup = cache.lookup("dossierA").await.expect("Le dossier doit être dans le cache");
+        let dir_lookup = cache
+            .lookup("dossierA")
+            .await
+            .expect("Le dossier doit être dans le cache");
         assert_eq!(dir_lookup.drive_id, "dir_A_id");
 
-        let file_lookup = cache.lookup("dossierA/fichier.txt").await.expect("Le fichier doit être dans le cache");
+        let file_lookup = cache
+            .lookup("dossierA/fichier.txt")
+            .await
+            .expect("Le fichier doit être dans le cache");
         assert_eq!(file_lookup.drive_id, "file_1_id");
     }
 
@@ -168,11 +176,23 @@ mod tests {
         cache.remove_cascades("a/b").await;
 
         // Vérifications
-        assert!(cache.lookup("a").await.is_some(), "Le parent 'a' doit rester intact");
-        assert!(cache.lookup("d").await.is_some(), "Le dossier 'd' ne doit pas être impacté");
+        assert!(
+            cache.lookup("a").await.is_some(),
+            "Le parent 'a' doit rester intact"
+        );
+        assert!(
+            cache.lookup("d").await.is_some(),
+            "Le dossier 'd' ne doit pas être impacté"
+        );
 
-        assert!(cache.lookup("a/b").await.is_none(), "Le dossier ciblé 'a/b' doit être supprimé");
-        assert!(cache.lookup("a/b/c.txt").await.is_none(), "L'enfant 'a/b/c.txt' doit être supprimé en cascade");
+        assert!(
+            cache.lookup("a/b").await.is_none(),
+            "Le dossier ciblé 'a/b' doit être supprimé"
+        );
+        assert!(
+            cache.lookup("a/b/c.txt").await.is_none(),
+            "L'enfant 'a/b/c.txt' doit être supprimé en cascade"
+        );
     }
 
     #[tokio::test]
@@ -189,6 +209,9 @@ mod tests {
         let (known_path, entry) = resolved.unwrap();
 
         assert_eq!(known_path, "a/b", "Le parent le plus profond est 'a/b'");
-        assert_eq!(entry.drive_id, "id_b", "L'ID doit correspondre au parent trouvé");
+        assert_eq!(
+            entry.drive_id, "id_b",
+            "L'ID doit correspondre au parent trouvé"
+        );
     }
 }
