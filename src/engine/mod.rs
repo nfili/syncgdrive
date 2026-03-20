@@ -217,6 +217,9 @@ impl SyncEngine {
                                             if let Err(e) = r {
                                                 if is_shutdown_err(&e) { shutdown.cancel(); break; }
                                                 let _ = status_tx.send(EngineStatus::Error(e.to_string()));
+                                            } else if tracker.total_files.load(Ordering::Relaxed) == 0 {
+                                                // NOUVEAU : Si 0 fichier trouvé, on met l'UI en repos immédiatement !
+                                                let _ = status_tx.send(EngineStatus::Idle);
                                             }
                                         }
                                         _ = shutdown.cancelled() => { break; }
@@ -281,6 +284,9 @@ impl SyncEngine {
                                     if let Err(e) = r {
                                         if is_shutdown_err(&e) { shutdown.cancel(); break; }
                                         let _ = status_tx.send(EngineStatus::Error(e.to_string()));
+                                    } else if tracker.total_files.load(Ordering::Relaxed) == 0 {
+                                        // NOUVEAU : Si 0 fichier trouvé, on met l'UI en repos immédiatement !
+                                        let _ = status_tx.send(EngineStatus::Idle);
                                     }
                                 }
                                 _ = shutdown.cancelled() => { break; }
@@ -309,6 +315,9 @@ impl SyncEngine {
                                         if let Err(e) = r {
                                             if is_shutdown_err(&e) { shutdown.cancel(); break; }
                                             let _ = status_tx.send(EngineStatus::Error(e.to_string()));
+                                        } else if tracker.total_files.load(Ordering::Relaxed) == 0 {
+                                            // NOUVEAU : Si 0 fichier trouvé, on met l'UI en repos immédiatement !
+                                            let _ = status_tx.send(EngineStatus::Idle);
                                         }
                                     }
                                     _ = shutdown.cancelled() => { break; }
@@ -345,6 +354,9 @@ impl SyncEngine {
                                 if let Err(e) = r {
                                     if is_shutdown_err(&e) { shutdown.cancel(); break; }
                                     let _ = status_tx.send(EngineStatus::Error(e.to_string()));
+                                } else if tracker.total_files.load(Ordering::Relaxed) == 0 {
+                                    // NOUVEAU : Si 0 fichier trouvé, on met l'UI en repos immédiatement !
+                                    let _ = status_tx.send(EngineStatus::Idle);
                                 }
                             }
                             _ = shutdown.cancelled() => { break; }
@@ -366,6 +378,9 @@ impl SyncEngine {
                             if let Err(e) = r {
                                 if is_shutdown_err(&e) { shutdown.cancel(); break; }
                                 let _ = status_tx.send(EngineStatus::Error(e.to_string()));
+                            }else if tracker.total_files.load(Ordering::Relaxed) == 0 {
+                                // NOUVEAU : Si 0 fichier trouvé, on met l'UI en repos immédiatement !
+                                let _ = status_tx.send(EngineStatus::Idle);
                             }
                         }
                         _ = shutdown.cancelled() => { break; }
@@ -394,8 +409,10 @@ impl SyncEngine {
                     tracker.total_files.fetch_add(1, Ordering::Relaxed);
                     tracker.total_bytes.fetch_add(file_size, Ordering::Relaxed);
 
-                    let permit = sem.clone().acquire_owned().await
-                        .context("semaphore closed")?;
+                    let permit = tokio::select! {
+                        p = sem.clone().acquire_owned() => p.context("semaphore closed")?,
+                        _ = shutdown.cancelled() => { break; } // Sortie immédiate !
+                    };
                     let db2 = db.clone();
                     let provider2 = provider.clone();
                     let path_cache2 = path_cache.clone();
@@ -420,15 +437,21 @@ impl SyncEngine {
 
                         let ignore = IgnoreMatcher::from_patterns(&ignore_pat).unwrap();
 
-                        // Appel au worker AVEC le tracker !
-                        if let Err(e) = worker::handle(task, &cfg2, &db2, &provider2, &path_cache2, &ignore, tracker2.clone(), &sd2).await {
-                            if !is_shutdown_err(&e) && !sd2.is_cancelled() {
-                                error!(error = %e, "worker task failed");
-                                let _ = stx2.send(EngineStatus::Error(e.to_string()));
-                                if scan::is_quota_err(&e) {
-                                    crate::notif::quota_exceeded(&cfg2);
-                                } else {
-                                    crate::notif::error(&cfg2, &e.to_string());
+                        // --- MODIFICATION ICI : On rend l'erreur TRÈS visible ---
+                        match worker::handle(task.clone(), &cfg2, &db2, &provider2, &path_cache2, &ignore, tracker2.clone(), &sd2).await {
+                            Ok(_) => {
+                                // Tout s'est bien passé
+                            }
+                            Err(e) => {
+                                if !is_shutdown_err(&e) && !sd2.is_cancelled() {
+                                    warn!("❌ ERREUR FATALE OUVRIER sur {:?} : {:?}", task, e);
+
+                                    let _ = stx2.send(EngineStatus::Error(e.to_string()));
+                                    if scan::is_quota_err(&e) {
+                                        crate::notif::quota_exceeded(&cfg2);
+                                    } else {
+                                        crate::notif::error(&cfg2, &e.to_string());
+                                    }
                                 }
                             }
                         }

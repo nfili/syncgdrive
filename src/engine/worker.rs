@@ -52,24 +52,31 @@ async fn sync_file(
     if file_size == 0 { return Ok(()); }
 
     let rel = rel_str(&cfg.sync_pairs[0].local_path, path)?;
-
     let mtime = mtime(path)?;
-    if let Some(e) = db.get(&rel)? {
-        if e.mtime == mtime { return Ok(()); }
+
+    let remote_exists = path_cache.lookup(&rel).await.is_some();
+    if remote_exists {
+        if let Some(e) = db.get(&rel)? {
+            if e.mtime == mtime { return Ok(()); }
+        }
     }
 
     if shutdown.is_cancelled() { return Ok(()); }
+
     let hash = match hash_file(path).await {
         Ok(h) => h,
         Err(_) if !path.is_file() => return Ok(()),
         Err(_) if shutdown.is_cancelled() => return Ok(()),
-        Err(e) => return Err(e),
+        Err(e) => return Err(e) ,
     };
 
-    if let Some(e) = db.get(&rel)? {
-        if e.hash == hash {
-            db.upsert(&FileEntry { path: rel.clone(), hash, mtime })?;
-            return Ok(());
+    // CONDITION CRUCIALE : On ne skip par le hash QUE SI le fichier existe sur le Drive !
+    if remote_exists {
+        if let Some(e) = db.get(&rel)? {
+            if e.hash == hash {
+                db.upsert(&FileEntry { path: rel.clone(), hash, mtime })?;
+                return Ok(());
+            }
         }
     }
 
@@ -83,10 +90,15 @@ async fn sync_file(
     let parent_id = if parent_rel.is_empty() {
         cfg.sync_pairs[0].remote_folder_id.clone()
     } else {
-        path_cache.lookup(&parent_rel).await
-            .context("Dossier parent introuvable dans le cache")?
-            .drive_id
+        match path_cache.lookup(&parent_rel).await {
+            Some(entry) => entry.drive_id,
+            None => {
+                anyhow::bail!("Dossier parent introuvable : {}", parent_rel);
+            }
+        }
     };
+
+    tracing::error!("🚨 RADAR 14 : Parent ID trouvé : {}", parent_id);
 
     let existing_entry = path_cache.lookup(&rel).await;
     let existing_id = existing_entry.as_ref().map(|e| e.drive_id.as_str());
@@ -94,6 +106,8 @@ async fn sync_file(
     // Upload !
     let parent_dir = path.parent().unwrap_or_else(|| Path::new("")).to_string_lossy().to_string();
     tracker.set_current_file(parent_dir, file_name.clone(), file_size);
+    tracing::info!("🚀 Préparation de l'upload pour : {:?}", path);
+
     let res = retry(cfg, shutdown, "upload", || async {
         provider.upload(path, &parent_id, &file_name, existing_id, tracker.clone()).await
     }).await?;

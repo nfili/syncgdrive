@@ -202,9 +202,13 @@ pub(crate) async fn run(
             });
         }
 
-        if db_index.contains(&rel) {
+        // NOUVEAU: On vérifie d'abord si le fichier existe vraiment sur Google Drive !
+        let remote_exists = path_cache.lookup(&rel).await.is_some();
+
+        if db_index.contains(&rel) && remote_exists { // <-- SÉCURITÉ ICI
             if let Ok(Some(entry)) = db.get(&rel) {
                 let mtime = mtime_of(file_path);
+                // On skip SEULEMENT si la date est bonne ET qu'il est sur le Drive
                 if mtime == entry.mtime {
                     skipped += 1;
                     continue;
@@ -217,7 +221,8 @@ pub(crate) async fn run(
                     }
                 }
             }
-        } else if path_cache.lookup(&rel).await.is_some() {
+        } else if remote_exists {
+            // Il est sur le Drive mais pas dans notre DB (ou on l'a oublié)
             if let Ok(hash) = hash_of(file_path).await {
                 let mtime = mtime_of(file_path);
                 let _ = db.upsert(&FileEntry { path: rel, hash, mtime });
@@ -226,6 +231,7 @@ pub(crate) async fn run(
             continue;
         }
 
+        // Si on arrive ici, le fichier DOIT être synchronisé (ajouté ou modifié)
         to_sync.push(file_path.clone());
     }
 
@@ -353,7 +359,7 @@ where
 {
     let mut attempt = 1;
     let max_attempts = cfg.retry.max_attempts;
-    let mut backoff = cfg.retry.initial_backoff_ms;
+    let backoff = cfg.retry.initial_backoff_ms;
 
     loop {
         if shutdown.is_cancelled() {
@@ -367,9 +373,11 @@ where
                     return Err(e);
                 }
                 tracing::warn!("{} a échoué (essai {}/{}) : {}, nouvelle tentative dans {}ms", name, attempt, max_attempts, e, backoff);
-                tokio::time::sleep(std::time::Duration::from_millis(backoff)).await;
+                tokio::select! {
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(backoff)) => {}
+                    _ = shutdown.cancelled() => anyhow::bail!("Annulé proprement pendant le retry"),
+                }
                 attempt += 1;
-                backoff = std::cmp::min(backoff * 2, cfg.retry.max_backoff_ms);
             }
         }
     }

@@ -91,9 +91,17 @@ impl GDriveProvider {
 
         let file_size = file_bytes.len() as u64;
 
-        // Limiteur et progression pour les petits fichiers
-        self.limiter.acquire(file_size).await;
-        tracker.record_bytes(file_size);
+        // On applique le limiteur UNIQUEMENT si la limite est supérieure à 0
+        if self.config.upload_limit_kbps > 0 {
+            tokio::select! {
+                _ = self.limiter.acquire(file_size) => {},
+                _ = self.shutdown.cancelled() => {
+                    anyhow::bail!("Attente de bande passante annulée proprement par le signal d'arrêt.");
+                }
+            }
+        } else if self.shutdown.is_cancelled() {
+            anyhow::bail!("Upload annulé.");
+        }
 
         let file_part = reqwest::multipart::Part::bytes(file_bytes)
             .file_name(file_name.to_string())
@@ -131,6 +139,7 @@ impl GDriveProvider {
             anyhow::bail!("Erreur API lors de l'upload simple : {}", res.status());
         }
 
+        tracker.record_bytes(file_size);
         let data: serde_json::Value = res.json().await?;
 
         Ok(UploadResult {
@@ -201,6 +210,7 @@ impl GDriveProvider {
 
         let stream_tracker = tracker.clone();
         let stream_limiter = self.limiter.clone();
+        let limit_kbps = self.config.upload_limit_kbps;
 
         // Création du flux asynchrone qui découpe le fichier par blocs de 64 Ko
         let stream = async_stream::stream! {
@@ -210,8 +220,10 @@ impl GDriveProvider {
                 match file.read(&mut buf).await {
                     Ok(0) => break, // Fin du fichier
                     Ok(n) => {
-                        // On demande la permission au bucket, et on enregistre l'avancée !
-                        stream_limiter.acquire(n as u64).await;
+                        // NOUVEAU : Pareil, on ne limite que si > 0
+                        if limit_kbps > 0 {
+                            stream_limiter.acquire(n as u64).await;
+                        }
                         stream_tracker.record_bytes(n as u64);
                         yield Ok::<_, std::io::Error>(bytes::Bytes::copy_from_slice(&buf[..n]));
                     }

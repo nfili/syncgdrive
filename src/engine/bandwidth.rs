@@ -50,7 +50,7 @@ impl ProgressTracker {
                 current_name: String::new(),
                 current_file_size: 0,
                 current_bytes_sent: 0,
-                speed_samples: VecDeque::new(),
+                speed_samples: VecDeque::with_capacity(100),
             }),
         }
     }
@@ -84,42 +84,29 @@ impl ProgressTracker {
         }
     }
 
-    /// Calcule la vitesse instantanée (fenêtre de 5s)
-    pub fn speed_bps(&self) -> u64 {
-        let state = self.state.lock().unwrap();
-        if state.speed_samples.len() < 2 {
-            return 0;
-        }
+    // ─── LOGIQUE INTERNE (SANS VERROU - Pour éviter les deadlocks) ───
+
+    fn _calculate_speed(state: &TrackerState) -> u64 {
+        if state.speed_samples.len() < 2 { return 0; }
 
         let (first_ts, first_bytes) = state.speed_samples.front().unwrap();
         let (last_ts, last_bytes) = state.speed_samples.back().unwrap();
 
         let elapsed = last_ts.duration_since(*first_ts).as_secs_f64();
-        if elapsed <= 0.0 {
-            return 0;
+        if elapsed > 0.0 {
+            (last_bytes.saturating_sub(*first_bytes) as f64 / elapsed) as u64
+        } else {
+            0
         }
-
-        let sent = last_bytes.saturating_sub(*first_bytes);
-        (sent as f64 / elapsed) as u64
     }
 
-    /// Estime le temps restant en secondes
-    pub fn eta_secs(&self) -> Option<u64> {
-        let speed = self.speed_bps();
-        if speed == 0 {
-            return None;
-        }
-        let total = self.total_bytes.load(Ordering::Relaxed);
-        let sent = self.sent_bytes.load(Ordering::Relaxed);
-        if sent >= total {
-            return Some(0);
-        }
+    fn _calculate_eta_secs(speed: u64, total: u64, sent: u64) -> Option<u64> {
+        if speed == 0 || sent >= total { return None; }
         Some((total - sent) / speed)
     }
 
-    /// Formate l'ETA en chaîne lisible par l'humain
-    pub fn human_eta(&self) -> String {
-        match self.eta_secs() {
+    fn _format_eta(eta: Option<u64>) -> String {
+        match eta {
             None => "⏳ En attente…".to_string(),
             Some(secs) if secs < 60 => format!("~{} s restantes", secs),
             Some(secs) if secs < 3600 => format!("~{} min restantes", secs / 60),
@@ -127,47 +114,62 @@ impl ProgressTracker {
         }
     }
 
-    /// Génère un instantané pour l'UI sans bloquer
-    pub fn snapshot(&self) -> ProgressSnapshot {
+    // ─── API PUBLIQUE (AVEC VERROU) ───
+
+    pub fn speed_bps(&self) -> u64 {
         let state = self.state.lock().unwrap();
-        // On calcule la vitesse pendant qu'on a le lock
-        let speed_bps = if state.speed_samples.len() >= 2 {
-            let (first_ts, first_bytes) = state.speed_samples.front().unwrap();
-            let (last_ts, last_bytes) = state.speed_samples.back().unwrap();
-            let elapsed = last_ts.duration_since(*first_ts).as_secs_f64();
-            if elapsed > 0.0 {
-                ((last_bytes.saturating_sub(*first_bytes)) as f64 / elapsed) as u64
-            } else {
-                0
-            }
-        } else {
-            0
-        };
+        Self::_calculate_speed(&state)
+    }
+
+    pub fn eta_secs(&self) -> Option<u64> {
+        let state = self.state.lock().unwrap();
+        let speed = Self::_calculate_speed(&state);
+        let total = self.total_bytes.load(Ordering::Relaxed);
+        let sent = self.sent_bytes.load(Ordering::Relaxed);
+        Self::_calculate_eta_secs(speed, total, sent)
+    }
+
+    pub fn human_eta(&self) -> String {
+        let eta = self.eta_secs();
+        Self::_format_eta(eta)
+    }
+
+    pub fn snapshot(&self) -> ProgressSnapshot {
+        // On récupère les atomiques en premier (pas de lock)
+        let total_files = self.total_files.load(Ordering::Relaxed);
+        let done_files = self.done_files.load(Ordering::Relaxed);
+        let total_bytes = self.total_bytes.load(Ordering::Relaxed);
+        let sent_bytes = self.sent_bytes.load(Ordering::Relaxed);
+
+        // On prend le verrou UNIQUE pour tout le reste
+        let state = self.state.lock().unwrap();
+        let speed = Self::_calculate_speed(&state);
+        let eta = Self::_calculate_eta_secs(speed, total_bytes, sent_bytes);
 
         ProgressSnapshot {
-            total_files: self.total_files.load(Ordering::Relaxed),
-            done_files: self.done_files.load(Ordering::Relaxed),
-            total_bytes: self.total_bytes.load(Ordering::Relaxed),
-            sent_bytes: self.sent_bytes.load(Ordering::Relaxed),
+            total_files,
+            done_files,
+            total_bytes,
+            sent_bytes,
             current_file_size: state.current_file_size,
             current_bytes_sent: state.current_bytes_sent,
             current_dir: state.current_dir.clone(),
             current_name: state.current_name.clone(),
-            speed_bps,
-            eta_string: self.human_eta(),
+            speed_bps: speed,
+            eta_string: Self::_format_eta(eta),
         }
     }
 }
 
-/// État interne du Token Bucket
+// ─── LIMITATION DE BANDE PASSANTE ───
+
 struct BucketState {
     tokens: f64,
     last_refill: Instant,
 }
 
-/// Limiteur de bande passante (Algorithme du Token Bucket)
 pub struct BandwidthLimiter {
-    limit_bps: u64, // 0 = illimité
+    limit_bps: u64,
     state: Mutex<BucketState>,
 }
 
@@ -177,17 +179,14 @@ impl BandwidthLimiter {
         Self {
             limit_bps,
             state: Mutex::new(BucketState {
-                tokens: limit_bps as f64, // Commence plein (1 seconde de tokens)
+                tokens: limit_bps as f64,
                 last_refill: Instant::now(),
             }),
         }
     }
 
-    /// Bloque jusqu'à ce que `n` octets soient autorisés à être envoyés.
     pub async fn acquire(&self, n: u64) {
-        if self.limit_bps == 0 {
-            return; // Illimité
-        }
+        if self.limit_bps == 0 { return; }
 
         loop {
             let delay = {
@@ -195,9 +194,7 @@ impl BandwidthLimiter {
                 let now = Instant::now();
                 let elapsed = now.duration_since(state.last_refill).as_secs_f64();
 
-                // Ajout des tokens générés depuis le dernier appel
                 state.tokens += elapsed * (self.limit_bps as f64);
-                // On capte à un maximum de 1 seconde de burst
                 if state.tokens > self.limit_bps as f64 {
                     state.tokens = self.limit_bps as f64;
                 }
@@ -205,9 +202,8 @@ impl BandwidthLimiter {
 
                 if state.tokens >= n as f64 {
                     state.tokens -= n as f64;
-                    None // On a assez de tokens, on passe
+                    None
                 } else {
-                    // Calcul du temps d'attente nécessaire pour obtenir les tokens manquants
                     let needed = n as f64 - state.tokens;
                     let wait_secs = needed / (self.limit_bps as f64);
                     Some(Duration::from_secs_f64(wait_secs))

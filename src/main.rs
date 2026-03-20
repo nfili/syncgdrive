@@ -143,7 +143,7 @@ async fn main() -> Result<()> {
     }
 
     info!("SyncGDrive arrêté proprement");
-    Ok(())
+    std::process::exit(0);
 }
 
 // ── Self-pipe : write-end stocké en statique atomique ────────────────────────
