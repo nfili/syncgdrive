@@ -2,6 +2,8 @@ pub mod scan;
 pub mod watcher;
 pub mod worker;
 pub mod bandwidth;
+pub mod rate_limiter;
+pub mod integrity;
 
 use std::path::PathBuf;
 use std::sync::Arc;
