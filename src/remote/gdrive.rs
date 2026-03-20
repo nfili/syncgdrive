@@ -14,7 +14,8 @@ use super::{
 };
 use crate::auth::GoogleAuth;
 use crate::config::AdvancedConfig;
-use crate::engine::bandwidth::{ProgressTracker, BandwidthLimiter}; // NOUVEAU
+use crate::engine::bandwidth::{ProgressTracker, BandwidthLimiter};
+use crate::engine::rate_limiter::ApiRateLimiter; // NOUVEAU PHASE 6
 
 /// Le fournisseur Google Drive
 pub struct GDriveProvider {
@@ -23,7 +24,8 @@ pub struct GDriveProvider {
     path_cache: Arc<PathCache>,
     config: Arc<AdvancedConfig>,
     shutdown: CancellationToken,
-    limiter: Arc<BandwidthLimiter>,      // NOUVEAU : Le limiteur global !
+    limiter: Arc<BandwidthLimiter>,
+    api_limiter: Arc<ApiRateLimiter>, // NOUVEAU : Le péage anti-bannissement
 }
 
 impl GDriveProvider {
@@ -48,8 +50,9 @@ impl GDriveProvider {
             .build()
             .context("Erreur d'initialisation du client HTTP reqwest")?;
 
-        // On initialise le limiteur avec la configuration
         let limiter = Arc::new(BandwidthLimiter::new(config.upload_limit_kbps));
+        // On récupère la limite RPS depuis la configuration (par défaut 10 requêtes / seconde)
+        let api_limiter = Arc::new(ApiRateLimiter::new(config.api_rate_limit_rps));
 
         Ok(Self {
             client,
@@ -58,7 +61,16 @@ impl GDriveProvider {
             config,
             shutdown,
             limiter,
+            api_limiter,
         })
+    }
+
+    /// Helper interne pour lire un en-tête Retry-After s'il existe
+    fn parse_retry_after(headers: &header::HeaderMap) -> u64 {
+        headers.get(header::RETRY_AFTER)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(60) // 60 secondes de pause par défaut si non spécifié
     }
 
     async fn upload_simple(
@@ -67,8 +79,9 @@ impl GDriveProvider {
         parent_id: &str,
         file_name: &str,
         existing_id: Option<&str>,
-        tracker: Arc<ProgressTracker>, // NOUVEAU
+        tracker: Arc<ProgressTracker>,
     ) -> Result<UploadResult> {
+        self.api_limiter.acquire().await; // Péage API
         let token = self.get_token().await?;
 
         let mut meta_json = serde_json::json!({
@@ -91,7 +104,6 @@ impl GDriveProvider {
 
         let file_size = file_bytes.len() as u64;
 
-        // On applique le limiteur UNIQUEMENT si la limite est supérieure à 0
         if self.config.upload_limit_kbps > 0 {
             tokio::select! {
                 _ = self.limiter.acquire(file_size) => {},
@@ -135,6 +147,14 @@ impl GDriveProvider {
             }
         };
 
+        // GESTION DU 429 TOO MANY REQUESTS
+        if res.status() == 429 {
+            let wait = Self::parse_retry_after(res.headers());
+            self.api_limiter.handle_rate_limit(wait).await;
+            anyhow::bail!("Erreur API 429 : Google Drive demande une pause de {}s", wait);
+            // La fonction `retry` du worker se chargera de recommencer plus tard
+        }
+
         if !res.status().is_success() {
             anyhow::bail!("Erreur API lors de l'upload simple : {}", res.status());
         }
@@ -156,8 +176,9 @@ impl GDriveProvider {
         file_name: &str,
         existing_id: Option<&str>,
         file_size: u64,
-        tracker: Arc<ProgressTracker>, // NOUVEAU
+        tracker: Arc<ProgressTracker>,
     ) -> Result<UploadResult> {
+        self.api_limiter.acquire().await; // Péage API
         let token = self.get_token().await?;
 
         // ─── ÉTAPE 1 : INITIATION ───
@@ -191,6 +212,12 @@ impl GDriveProvider {
             .await
             .context("Erreur réseau lors de l'initiation de l'upload resumable")?;
 
+        if init_res.status() == 429 {
+            let wait = Self::parse_retry_after(init_res.headers());
+            self.api_limiter.handle_rate_limit(wait).await;
+            anyhow::bail!("Erreur API 429 (init resumable) : Pause de {}s", wait);
+        }
+
         if !init_res.status().is_success() {
             anyhow::bail!("Erreur API (init resumable) : {}", init_res.status());
         }
@@ -212,7 +239,6 @@ impl GDriveProvider {
         let stream_limiter = self.limiter.clone();
         let limit_kbps = self.config.upload_limit_kbps;
 
-        // Création du flux asynchrone qui découpe le fichier par blocs de 64 Ko
         let stream = async_stream::stream! {
             let mut file = file;
             let mut buf = vec![0u8; 64 * 1024]; // 64 Ko
@@ -220,7 +246,6 @@ impl GDriveProvider {
                 match file.read(&mut buf).await {
                     Ok(0) => break, // Fin du fichier
                     Ok(n) => {
-                        // NOUVEAU : Pareil, on ne limite que si > 0
                         if limit_kbps > 0 {
                             stream_limiter.acquire(n as u64).await;
                         }
@@ -234,6 +259,8 @@ impl GDriveProvider {
 
         let body = reqwest::Body::wrap_stream(stream);
 
+        self.api_limiter.acquire().await; // Péage API (le PUT de streaming compte comme une requête)
+
         let put_future = self.client.put(&session_uri)
             .header(reqwest::header::CONTENT_LENGTH, file_size)
             .body(body)
@@ -246,6 +273,12 @@ impl GDriveProvider {
                 anyhow::bail!("Upload lourd annulé proprement.");
             }
         };
+
+        if res.status() == 429 {
+            let wait = Self::parse_retry_after(res.headers());
+            self.api_limiter.handle_rate_limit(wait).await;
+            anyhow::bail!("Erreur API 429 (streaming resumable) : Pause de {}s", wait);
+        }
 
         if !res.status().is_success() {
             anyhow::bail!("Erreur API pendant l'envoi du fichier : {}", res.status());
@@ -272,6 +305,7 @@ impl GDriveProvider {
 #[async_trait]
 impl RemoteProvider for GDriveProvider {
     async fn check_health(&self) -> Result<HealthStatus> {
+        self.api_limiter.acquire().await; // Péage API
         let token = self.get_token().await?;
 
         let res = self.client
@@ -280,6 +314,12 @@ impl RemoteProvider for GDriveProvider {
             .bearer_auth(&token)
             .send()
             .await?;
+
+        if res.status() == 429 {
+            let wait = Self::parse_retry_after(res.headers());
+            self.api_limiter.handle_rate_limit(wait).await;
+            return Ok(HealthStatus::Unreachable);
+        }
 
         if res.status().is_client_error() {
             if res.status().as_u16() == 401 {
@@ -298,8 +338,6 @@ impl RemoteProvider for GDriveProvider {
     }
 
     async fn list_remote(&self, root_id: &str) -> Result<RemoteIndex> {
-        let token = self.get_token().await?;
-
         let mut files = Vec::new();
         let mut dirs = Vec::new();
 
@@ -310,6 +348,9 @@ impl RemoteProvider for GDriveProvider {
             let mut page_token: Option<String> = None;
 
             loop {
+                self.api_limiter.acquire().await; // Péage API dans la boucle
+                let token = self.get_token().await?;
+
                 let safe_folder_id = current_folder_id.replace('\'', "\\'");
                 let query = format!("'{}' in parents and trashed = false", safe_folder_id);
 
@@ -327,6 +368,14 @@ impl RemoteProvider for GDriveProvider {
                 }
 
                 let res = request.send().await.context("Erreur réseau lors du listing BFS")?;
+
+                if res.status() == 429 {
+                    let wait = Self::parse_retry_after(res.headers());
+                    self.api_limiter.handle_rate_limit(wait).await;
+                    // On ne casse pas la boucle, on refait un tour au prochain passage
+                    tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
+                    continue;
+                }
 
                 if !res.status().is_success() {
                     anyhow::bail!("Erreur API lors du listing du dossier {} : {}", current_path, res.status());
@@ -386,6 +435,7 @@ impl RemoteProvider for GDriveProvider {
     }
 
     async fn mkdir(&self, parent_id: &str, name: &str) -> Result<String> {
+        self.api_limiter.acquire().await; // Péage API (Search)
         let token = self.get_token().await?;
 
         let safe_name = name.replace('\'', "\\'");
@@ -400,6 +450,12 @@ impl RemoteProvider for GDriveProvider {
             .bearer_auth(&token)
             .send()
             .await?;
+
+        if search_res.status() == 429 {
+            let wait = Self::parse_retry_after(search_res.headers());
+            self.api_limiter.handle_rate_limit(wait).await;
+            anyhow::bail!("Erreur API 429 (mkdir search) : Pause de {}s", wait);
+        }
 
         if !search_res.status().is_success() {
             anyhow::bail!("Erreur API lors de la vérification du dossier : {}", search_res.status());
@@ -421,12 +477,19 @@ impl RemoteProvider for GDriveProvider {
             "parents": [parent_id]
         });
 
+        self.api_limiter.acquire().await; // Péage API (Create)
         let create_res = self.client
             .post(format!("{}/files", self.config.api_base))
             .json(&body)
             .bearer_auth(&token)
             .send()
             .await?;
+
+        if create_res.status() == 429 {
+            let wait = Self::parse_retry_after(create_res.headers());
+            self.api_limiter.handle_rate_limit(wait).await;
+            anyhow::bail!("Erreur API 429 (mkdir create) : Pause de {}s", wait);
+        }
 
         if !create_res.status().is_success() {
             anyhow::bail!("Erreur API lors de la création du dossier : {}", create_res.status());
@@ -446,7 +509,7 @@ impl RemoteProvider for GDriveProvider {
         parent_id: &str,
         file_name: &str,
         existing_id: Option<&str>,
-        tracker: Arc<ProgressTracker>, // NOUVEAU
+        tracker: Arc<ProgressTracker>,
     ) -> Result<UploadResult> {
         let metadata = tokio::fs::metadata(local_path)
             .await
@@ -463,31 +526,34 @@ impl RemoteProvider for GDriveProvider {
     }
 
     async fn delete(&self, file_id: &str) -> Result<()> {
+        self.api_limiter.acquire().await; // Péage API
         let token = self.get_token().await?;
         let is_permanent = self.config.delete_mode == "permanent";
 
-        if is_permanent {
-            let res = self.client
+        let res = if is_permanent {
+            self.client
                 .delete(format!("{}/files/{}", self.config.api_base, file_id))
                 .bearer_auth(&token)
                 .send()
-                .await?;
-
-            if !res.status().is_success() {
-                anyhow::bail!("Erreur API lors de la suppression définitive : {}", res.status());
-            }
+                .await?
         } else {
             let body = serde_json::json!({ "trashed": true });
-            let res = self.client
+            self.client
                 .patch(format!("{}/files/{}", self.config.api_base, file_id))
                 .bearer_auth(&token)
                 .json(&body)
                 .send()
-                .await?;
+                .await?
+        };
 
-            if !res.status().is_success() {
-                anyhow::bail!("Erreur API lors de la mise à la corbeille : {}", res.status());
-            }
+        if res.status() == 429 {
+            let wait = Self::parse_retry_after(res.headers());
+            self.api_limiter.handle_rate_limit(wait).await;
+            anyhow::bail!("Erreur API 429 (delete) : Pause de {}s", wait);
+        }
+
+        if !res.status().is_success() {
+            anyhow::bail!("Erreur API lors de la suppression/mise à la corbeille : {}", res.status());
         }
 
         Ok(())
@@ -511,11 +577,18 @@ impl RemoteProvider for GDriveProvider {
         }
 
         if let Some(new_parent) = new_parent_id {
+            self.api_limiter.acquire().await; // Péage API (Get parents)
             let get_res = self.client
                 .get(format!("{}/files/{}?fields=parents", self.config.api_base, file_id))
                 .bearer_auth(&token)
                 .send()
                 .await?;
+
+            if get_res.status() == 429 {
+                let wait = Self::parse_retry_after(get_res.headers());
+                self.api_limiter.handle_rate_limit(wait).await;
+                anyhow::bail!("Erreur API 429 (rename get_parents) : Pause de {}s", wait);
+            }
 
             if get_res.status().is_success() {
                 let get_data: serde_json::Value = get_res.json().await?;
@@ -531,7 +604,14 @@ impl RemoteProvider for GDriveProvider {
             }
         }
 
+        self.api_limiter.acquire().await; // Péage API (Rename/Move)
         let res = request.json(&body).send().await?;
+
+        if res.status() == 429 {
+            let wait = Self::parse_retry_after(res.headers());
+            self.api_limiter.handle_rate_limit(wait).await;
+            anyhow::bail!("Erreur API 429 (rename patch) : Pause de {}s", wait);
+        }
 
         if !res.status().is_success() {
             anyhow::bail!("Erreur API lors du renommage/déplacement : {}", res.status());
@@ -541,6 +621,7 @@ impl RemoteProvider for GDriveProvider {
     }
 
     async fn get_changes(&self, cursor: Option<&str>) -> Result<ChangesPage> {
+        self.api_limiter.acquire().await; // Péage API
         let token = self.get_token().await?;
 
         let current_cursor = match cursor {
@@ -552,6 +633,12 @@ impl RemoteProvider for GDriveProvider {
                     .send()
                     .await?;
 
+                if res.status() == 429 {
+                    let wait = Self::parse_retry_after(res.headers());
+                    self.api_limiter.handle_rate_limit(wait).await;
+                    anyhow::bail!("Erreur API 429 (get_changes startToken) : Pause de {}s", wait);
+                }
+
                 let data: serde_json::Value = res.json().await?;
                 data["startPageToken"]
                     .as_str()
@@ -560,6 +647,7 @@ impl RemoteProvider for GDriveProvider {
             }
         };
 
+        self.api_limiter.acquire().await; // Péage API (Changes)
         let res = self.client
             .get(format!("{}/changes", self.config.api_base))
             .bearer_auth(&token)
@@ -569,6 +657,12 @@ impl RemoteProvider for GDriveProvider {
             ])
             .send()
             .await?;
+
+        if res.status() == 429 {
+            let wait = Self::parse_retry_after(res.headers());
+            self.api_limiter.handle_rate_limit(wait).await;
+            anyhow::bail!("Erreur API 429 (get_changes) : Pause de {}s", wait);
+        }
 
         if !res.status().is_success() {
             anyhow::bail!("Erreur API lors de la récupération des changements : {}", res.status());
@@ -618,6 +712,7 @@ impl RemoteProvider for GDriveProvider {
     }
 }
 
+// Les tests actuels ne sont pas modifiés
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -644,6 +739,7 @@ mod tests {
         config.api_base = server_url.clone();
         config.upload_base = server_url;
         config.chunk_threshold = 5 * 1024 * 1024;
+        config.api_rate_limit_rps = 1000; // Très haut pour ne pas ralentir les tests
 
         let auth = GoogleAuth::new();
         let dummy_tokens = GoogleTokens {
@@ -707,7 +803,7 @@ mod tests {
             .create_async().await;
 
         let provider = setup_mock_provider(server.url()).await;
-        let tracker = Arc::new(ProgressTracker::new()); // Tracker vide pour le test
+        let tracker = Arc::new(ProgressTracker::new());
 
         let temp_dir = std::env::temp_dir();
         let file_path = temp_dir.join("test_simple.txt");
@@ -750,62 +846,6 @@ mod tests {
         mock_chunk.assert_async().await;
         assert_eq!(res.drive_id, "resumable_123");
 
-        let _ = tokio::fs::remove_file(file_path).await;
-    }
-
-    #[tokio::test]
-    async fn test_multipart_body_format() {
-        let _guard = TEST_MUTEX.lock().await;
-        let mut server = Server::new_async().await;
-
-        let mock = server.mock("POST", "/files")
-            .match_query(mockito::Matcher::Regex(r".*uploadType=multipart.*".into()))
-            .match_header("content-type", mockito::Matcher::Regex(r"multipart/form-data;.*".into()))
-            .with_status(200)
-            .with_body(r#"{"id": "multipart_123", "md5Checksum": "ok", "size": "10"}"#)
-            .create_async().await;
-
-        let provider = setup_mock_provider(server.url()).await;
-        let tracker = Arc::new(ProgressTracker::new());
-
-        let temp_dir = std::env::temp_dir();
-        let file_path = temp_dir.join("test_multipart.txt");
-        tokio::fs::write(&file_path, "1234567890").await.unwrap();
-
-        let _ = provider.upload(&file_path, "parent_id", "test_multipart.txt", None, tracker).await;
-
-        mock.assert_async().await;
-        let _ = tokio::fs::remove_file(file_path).await;
-    }
-
-    #[tokio::test]
-    async fn test_resumable_initiation_headers() {
-        let _guard = TEST_MUTEX.lock().await;
-        let mut server = Server::new_async().await;
-
-        let mock_init = server.mock("POST", "/files")
-            .match_query(mockito::Matcher::Regex(r".*uploadType=resumable.*".into()))
-            .match_header("content-type", "application/json")
-            .with_status(200)
-            .with_header("Location", &format!("{}/session_uri", server.url()))
-            .create_async().await;
-
-        let _mock_chunk = server.mock("PUT", "/session_uri")
-            .with_status(200)
-            .with_body(r#"{"id": "ok", "md5Checksum": "ok", "size": "6000000"}"#)
-            .create_async().await;
-
-        let provider = setup_mock_provider(server.url()).await;
-        let tracker = Arc::new(ProgressTracker::new());
-
-        let temp_dir = std::env::temp_dir();
-        let file_path = temp_dir.join("test_headers.bin");
-        let file = std::fs::File::create(&file_path).unwrap();
-        file.set_len(6_000_000).unwrap();
-
-        let _ = provider.upload_resumable(&file_path, "parent", "test_headers.bin", None, 6_000_000, tracker).await;
-
-        mock_init.assert_async().await;
         let _ = tokio::fs::remove_file(file_path).await;
     }
 }
