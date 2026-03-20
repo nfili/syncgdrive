@@ -1,6 +1,6 @@
 //! Base de données SQLite WAL pour la persistance de l'état de synchronisation.
 //!
-//! Ce module a été mis à jour pour la V2 (Phase 1). Il intègre :
+//! Intègre :
 //! - `schema_version` pour les migrations automatiques.
 //! - `path_cache` pour réduire les requêtes HTTP (Phase 3).
 //! - `offline_queue` pour la gestion hors-ligne (Phase 6).
@@ -28,12 +28,13 @@ pub struct PathCacheEntry {
     pub updated_at: i64,
 }
 
+// Alignée sur ton spec 06_RESILIENCE.md
 #[derive(Debug, Clone)]
-pub struct OfflineQueueEntry {
+pub struct OfflineTask {
     pub id: i64,
-    pub action: String,
+    pub action: String, // "sync", "delete", "rename"
     pub relative_path: String,
-    pub extra: Option<String>,
+    pub extra: Option<String>, // Sert pour stocker l'ancien chemin lors d'un "rename"
     pub created_at: i64,
 }
 
@@ -55,8 +56,6 @@ impl Database {
 
     // ── Migration & Initialisation (Phase 1) ──────────────────────────────────
 
-    /// Détermine la version actuelle du schéma.
-    /// Retourne 0 si la base est vierge, 1 pour la V1 (sans table schema_version).
     pub fn schema_version(&self) -> Result<i32> {
         let conn = self.lock()?;
 
@@ -79,12 +78,10 @@ impl Database {
         Ok(version)
     }
 
-    /// Initialise le schéma ou migre la base de données vers la V2.
     pub fn init_and_migrate(&self) -> Result<()> {
         let version = self.schema_version()?;
 
         if version == 0 {
-            // Création d'une nouvelle base V2
             let mut conn = self.inner.lock().map_err(|_| anyhow::anyhow!("SQLite mutex poisoned"))?;
             let tx = conn.transaction()?;
 
@@ -121,7 +118,6 @@ impl Database {
             info!("Nouvelle base de données initialisée (Schéma V2)");
 
         } else if version == 1 {
-            // Migration V1 -> V2
             let mut conn = self.inner.lock().map_err(|_| anyhow::anyhow!("SQLite mutex poisoned"))?;
             let tx = conn.transaction()?;
 
@@ -178,10 +174,8 @@ impl Database {
         Ok(())
     }
 
-    // (Je conserve les autres fonctions V1 existantes : delete, rename, clear, etc.)
     pub fn count(&self) -> Result<usize> {
         let conn = self.lock()?;
-        // Typage fort de la variable : le compilateur propage l'inférence à get(0)
         let total: usize = conn.query_row("SELECT COUNT(*) FROM file_index", [], |r| r.get(0))?;
         Ok(total)
     }
@@ -224,9 +218,9 @@ impl Database {
         Ok(())
     }
 
-    // ── offline_queue (Nouveauté V2) ──────────────────────────────────────────
+    // ── offline_queue (Nouveauté V2 - Phase 6) ────────────────────────────────
 
-    pub fn push_offline_queue(&self, action: &str, path: &str, extra: Option<&str>) -> Result<i64> {
+    pub fn push_offline_task(&self, action: &str, path: &str, extra: Option<&str>) -> Result<i64> {
         let conn = self.lock()?;
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs() as i64;
         conn.execute(
@@ -236,26 +230,38 @@ impl Database {
         Ok(conn.last_insert_rowid())
     }
 
-    pub fn pop_offline_queue(&self) -> Result<Option<OfflineQueueEntry>> {
+    /// Récupère toutes les tâches hors-ligne par ordre d'arrivée (FIFO)
+    pub fn get_offline_tasks(&self) -> Result<Vec<OfflineTask>> {
         let conn = self.lock()?;
-        // FIFO : on prend le plus ancien
-        let mut stmt = conn.prepare("SELECT id, action, relative_path, extra, created_at FROM offline_queue ORDER BY id ASC LIMIT 1")?;
+        let mut stmt = conn.prepare("SELECT id, action, relative_path, extra, created_at FROM offline_queue ORDER BY id ASC")?;
 
-        let entry = stmt.query_row([], |row| {
-            Ok(OfflineQueueEntry {
+        let task_iter = stmt.query_map([], |row| {
+            Ok(OfflineTask {
                 id: row.get(0)?,
                 action: row.get(1)?,
                 relative_path: row.get(2)?,
                 extra: row.get(3)?,
                 created_at: row.get(4)?,
             })
-        }).optional()?;
+        })?;
 
-        if let Some(ref e) = entry {
-            conn.execute("DELETE FROM offline_queue WHERE id = ?1", params![e.id])?;
+        let mut tasks = Vec::new();
+        for task in task_iter {
+            tasks.push(task?);
         }
+        Ok(tasks)
+    }
 
-        Ok(entry)
+    pub fn remove_offline_task(&self, id: i64) -> Result<()> {
+        let conn = self.lock()?;
+        conn.execute("DELETE FROM offline_queue WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    pub fn clear_offline_queue(&self) -> Result<()> {
+        let conn = self.lock()?;
+        conn.execute("DELETE FROM offline_queue", [])?;
+        Ok(())
     }
 
     // ── Méthodes de compatibilité Moteur V1 (Phase 1) ────────────────────────
@@ -396,16 +402,22 @@ mod tests {
     #[test]
     fn test_offline_queue_fifo() {
         let db = fresh_db();
-        db.push_offline_queue("sync", "file1.txt", None).unwrap();
-        db.push_offline_queue("delete", "file2.txt", Some("metadata")).unwrap();
+        db.push_offline_task("sync", "file1.txt", None).unwrap();
+        db.push_offline_task("rename", "file2.txt", Some("file1.txt")).unwrap();
 
-        let first = db.pop_offline_queue().unwrap().unwrap();
-        assert_eq!(first.action, "sync"); // Le premier entré doit sortir en premier
+        let tasks = db.get_offline_tasks().unwrap();
+        assert_eq!(tasks.len(), 2);
 
-        let second = db.pop_offline_queue().unwrap().unwrap();
-        assert_eq!(second.action, "delete");
-        assert_eq!(second.extra.unwrap(), "metadata");
+        assert_eq!(tasks[0].action, "sync");
+        assert_eq!(tasks[0].relative_path, "file1.txt");
 
-        assert!(db.pop_offline_queue().unwrap().is_none()); // Vide
+        assert_eq!(tasks[1].action, "rename");
+        assert_eq!(tasks[1].relative_path, "file2.txt");
+        assert_eq!(tasks[1].extra.as_deref().unwrap(), "file1.txt");
+
+        db.remove_offline_task(tasks[0].id).unwrap();
+        let tasks_after = db.get_offline_tasks().unwrap();
+        assert_eq!(tasks_after.len(), 1);
+        assert_eq!(tasks_after[0].action, "rename");
     }
 }
