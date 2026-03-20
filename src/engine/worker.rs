@@ -105,8 +105,26 @@ async fn sync_file(
     let parent_dir = path.parent().unwrap_or_else(|| Path::new("")).to_string_lossy().to_string();
     tracker.set_current_file(parent_dir, file_name.clone(), file_size);
 
+    // Upload avec vérification d'intégrité intégrée !
     let res = retry(cfg, shutdown, "upload", || async {
-        provider.upload(path, &parent_id, &file_name, existing_id, tracker.clone()).await
+        // 1. On tente l'upload
+        let upload_res = provider.upload(path, &parent_id, &file_name, existing_id, tracker.clone()).await?;
+
+        // 2. On vérifie l'intégrité immédiatement après
+        match crate::engine::integrity::verify_upload(path, &upload_res).await {
+            Ok(crate::engine::integrity::IntegrityResult::Ok) => {
+                Ok(upload_res) // Tout est parfait, on valide !
+            }
+            Ok(crate::engine::integrity::IntegrityResult::Mismatch { local_md5, remote_md5 }) => {
+                tracing::warn!("⚠️ Intégrité corrompue pour {:?} (local: {}, remote: {}). Re-tentative automatique...", path, local_md5, remote_md5);
+                // Le fait de renvoyer une erreur ici force la boucle `retry` à recommencer l'upload !
+                anyhow::bail!("mismatch md5 detecté post-upload")
+            }
+            Err(e) => {
+                tracing::warn!("⚠️ Impossible de vérifier l'intégrité de {:?} : {}", path, e);
+                Err(e)
+            }
+        }
     }).await?;
 
     // On passe bien 3 arguments et on await !
