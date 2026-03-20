@@ -276,12 +276,19 @@ mod tests {
     impl RemoteProvider for MockProvider {
         async fn list_remote(&self, _root: &str) -> Result<RemoteIndex> { Ok(RemoteIndex{files: vec![], dirs: vec![]}) }
         async fn mkdir(&self, _parent: &str, _name: &str) -> Result<String> { Ok("mock_dir".into()) }
-        async fn upload(&self, _local: &Path, _parent: &str, _name: &str, _exist: Option<&str>,_tracker: Arc<ProgressTracker>) -> Result<UploadResult> {
+        async fn upload(&self, local: &Path, _parent: &str, _name: &str, _exist: Option<&str>,_tracker: Arc<ProgressTracker>) -> Result<UploadResult> {
             self.uploads.fetch_add(1, Ordering::Relaxed);
+
+            // On calcule le vrai hash du fichier de test pour satisfaire le bouclier d'intégrité
+            let data = tokio::fs::read(local).await.unwrap_or_default();
+            let mut hasher = sha2::Sha256::new();
+            sha2::Digest::update(&mut hasher, &data);
+            let real_hash = format!("{:x}", hasher.finalize());
+
             Ok(UploadResult {
                 drive_id: "mock_file_id".into(),
-                md5_checksum: "mock_md5".into(),
-                size_bytes: 100,
+                md5_checksum: real_hash, // On retourne la vraie empreinte !
+                size_bytes: data.len() as u64,
             })
         }
 

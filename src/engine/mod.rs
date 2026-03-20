@@ -695,4 +695,44 @@ mod tests {
         assert!(count >= 1);
         assert!(count <= 2);
     }
+
+    #[tokio::test]
+    async fn test_offline_online_cycle() {
+        let db = test_db();
+        let (task_tx, mut task_rx) = mpsc::channel(10);
+
+        // 1. Simuler le mode Survie : on ajoute des tâches dans la base hors-ligne
+        db.push_offline_task("sync", "fichier_train.txt", None).unwrap();
+        db.push_offline_task("delete", "vieux_brouillon.txt", None).unwrap();
+        db.push_offline_task("rename", "nouveau_nom.txt", Some("ancien_nom.txt")).unwrap();
+
+        // 2. Simuler le retour de la connexion : on appelle le flush
+        super::offline::flush_queue(&db, &task_tx).await.unwrap();
+
+        // 3. Vérifier que les tâches ont bien été réinjectées dans le circuit principal
+        let task1 = task_rx.recv().await.unwrap();
+        match task1 {
+            Task::SyncFile { path } => assert_eq!(path.to_string_lossy(), "fichier_train.txt"),
+            _ => panic!("Tâche 1 inattendue"),
+        }
+
+        let task2 = task_rx.recv().await.unwrap();
+        match task2 {
+            Task::Delete(path) => assert_eq!(path.to_string_lossy(), "vieux_brouillon.txt"),
+            _ => panic!("Tâche 2 inattendue"),
+        }
+
+        let task3 = task_rx.recv().await.unwrap();
+        match task3 {
+            Task::Rename { from, to } => {
+                assert_eq!(from.to_string_lossy(), "ancien_nom.txt");
+                assert_eq!(to.to_string_lossy(), "nouveau_nom.txt");
+            }
+            _ => panic!("Tâche 3 inattendue"),
+        }
+
+        // 4. Vérifier que l'estomac SQLite est totalement vide après le traitement
+        let remaining = db.get_offline_tasks().unwrap();
+        assert!(remaining.is_empty(), "La base de données devrait être vide après le flush");
+    }
 }
