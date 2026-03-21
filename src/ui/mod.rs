@@ -21,5 +21,7 @@
 
 pub mod settings;
 pub mod tray;
+pub mod icons;
+pub mod scan_window;
 
 pub use tray::spawn_tray;

@@ -124,6 +124,11 @@ impl SyncEngine {
 
         {
             let _ = status_tx.send(EngineStatus::Syncing { active: 0 });
+            // Ouvre la fenêtre de progression si c'est le tout premier scan complet
+            if db.count_files().unwrap_or(0) == 0 {
+                #[cfg(feature = "ui")]
+                crate::ui::tray::show_scan_window();
+            }
             let scan = scan::run(
                 &self.cfg,
                 &db,
