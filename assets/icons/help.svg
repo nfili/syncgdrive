@@ -20,10 +20,10 @@
         <circle cx="12" cy="17" r="1" fill="darkblue"
                 filter="url(#dropShadow)" />
         <ellipse cx="11" cy="8" rx="1" ry="0.38" fill="none" stroke="white"
-                 stroke-width="0.75" stroke-linecap="round"
+                 stroke-width="0.77" stroke-linecap="round"
                  filter="url(#dropShadow)"
                  transform="rotate(-30, 11, 8)"
-                 opacity="0.8"
+                 opacity="0.4"
         />
     </g>
 </svg>

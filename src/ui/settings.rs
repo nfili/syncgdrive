@@ -13,7 +13,7 @@ pub fn show_settings_in_app(
     cmd_tx: tokio::sync::mpsc::Sender<EngineCommand>
 ) {
     // 1. On met le moteur en pause
-
+    let _ = cmd_tx.try_send(EngineCommand::OpenSettings);
 
     let (cfg, _) = match AppConfig::load_or_create() {
         Ok(c) => c,
