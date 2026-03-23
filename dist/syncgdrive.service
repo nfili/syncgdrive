@@ -14,8 +14,7 @@ TimeoutStopSec=5
 Restart=on-failure
 RestartSec=10
 
-# Environnement nécessaire pour KIO, GTK4, D-Bus
-Environment=DISPLAY=:0
+# Environnement nécessaire pour KIO, GTK4, D-Bus : Environment=DISPLAY=:0
 # RUST_LOG configurable — info par défaut, debug pour diagnostiquer
 Environment=RUST_LOG=info,zbus=warn,globset=warn,glib=warn
 
