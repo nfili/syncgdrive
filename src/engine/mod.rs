@@ -167,7 +167,10 @@ impl SyncEngine {
         status_tx: mpsc::UnboundedSender<EngineStatus>,
     ) -> Result<()> {
         let (task_tx, mut task_rx) = mpsc::channel::<Task>(1024);
-        let primary = self.cfg.get_primary_pair().context("Aucun dossier n'est configuré!")?;
+        let primary = self
+            .cfg
+            .get_primary_pair()
+            .context("Aucun dossier n'est configuré!")?;
         let ignore = IgnoreMatcher::from_patterns(&primary.ignore_patterns)?;
 
         let mut paused = false;
@@ -255,7 +258,10 @@ impl SyncEngine {
         }
 
         let (watch_tx, watch_rx) = mpsc::channel(256);
-        let primary = self.cfg.get_primary_pair().context("Aucun dossier n'est configuré!")?;
+        let primary = self
+            .cfg
+            .get_primary_pair()
+            .context("Aucun dossier n'est configuré!")?;
 
         let mut watcher = watcher::Watcher::start(&primary.local_path, watch_tx)?;
 
@@ -798,12 +804,8 @@ mod tests {
         let shutdown = CancellationToken::new();
         let tracker = Arc::new(ProgressTracker::new());
 
-        tracker
-            .total_files
-            .store(10, Ordering::Relaxed);
-        tracker
-            .done_files
-            .store(5, Ordering::Relaxed);
+        tracker.total_files.store(10, Ordering::Relaxed);
+        tracker.done_files.store(5, Ordering::Relaxed);
 
         tokio::spawn(progress_publisher(
             tracker.clone(),

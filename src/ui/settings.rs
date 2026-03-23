@@ -10,7 +10,7 @@ use crate::engine::EngineCommand;
 
 pub fn show_settings_in_app(
     app: &libadwaita::Application,
-    cmd_tx: tokio::sync::mpsc::Sender<EngineCommand>
+    cmd_tx: tokio::sync::mpsc::Sender<EngineCommand>,
 ) {
     // 1. On met le moteur en pause
     let _ = cmd_tx.try_send(EngineCommand::OpenSettings);
@@ -29,7 +29,8 @@ pub fn show_settings_in_app(
     let win = open(app, config, move |new_cfg| {
         is_saved_clone.set(true); // On note qu'on a cliqué sur Enregistrer
         let _ = cmd_tx.try_send(EngineCommand::ApplyConfig(Arc::new(new_cfg)));
-    }).expect("Erreur création fenêtre réglages");
+    })
+    .expect("Erreur création fenêtre réglages");
 
     // 3. Si on ferme avec la croix sans enregistrer, on enlève la pause !
     win.connect_close_request(move |_| {
@@ -56,7 +57,10 @@ where
         .lock()
         .map_err(|_| anyhow::anyhow!("config mutex poisoned"))?
         .clone();
-    let primary = cfg.get_primary_pair().cloned().context("Pas de dossier configuré")?;
+    let primary = cfg
+        .get_primary_pair()
+        .cloned()
+        .context("Pas de dossier configuré")?;
 
     let mut win_builder = libadwaita::Window::builder()
         .title("SyncGDrive — Réglages")
@@ -236,7 +240,8 @@ where
                 let (tx, rx) = tokio::sync::oneshot::channel();
 
                 std::thread::spawn(move || {
-                    let rt = tokio::runtime::Runtime::new().expect("Erreur runtime Tokio temporaire");
+                    let rt =
+                        tokio::runtime::Runtime::new().expect("Erreur runtime Tokio temporaire");
                     let res = rt.block_on(async {
                         let creds = crate::auth::OAuthAppCredentials::default();
                         crate::auth::oauth2::authenticate(&creds).await

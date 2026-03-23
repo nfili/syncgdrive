@@ -19,7 +19,11 @@ pub fn split_path_display(path: &str) -> (String, String) {
 
     if parts.len() == 1 {
         // Fichier (ou dossier) à la racine
-        let name = if is_dir { format!("{}/", parts[0]) } else { parts[0].to_string() };
+        let name = if is_dir {
+            format!("{}/", parts[0])
+        } else {
+            parts[0].to_string()
+        };
         return (String::new(), name);
     }
 
@@ -38,7 +42,11 @@ pub fn split_path_display(path: &str) -> (String, String) {
         format!("{}/", folders.join("/"))
     };
 
-    let final_name = if is_dir { format!("{}/", target_name) } else { target_name.to_string() };
+    let final_name = if is_dir {
+        format!("{}/", target_name)
+    } else {
+        target_name.to_string()
+    };
 
     (folder_str, final_name)
 }
@@ -69,12 +77,18 @@ mod tests {
 
     #[test]
     fn test_split_path_display_root_file() {
-        assert_eq!(split_path_display("file.txt"), ("".into(), "file.txt".into()));
+        assert_eq!(
+            split_path_display("file.txt"),
+            ("".into(), "file.txt".into())
+        );
     }
 
     #[test]
     fn test_split_path_display_nested() {
-        assert_eq!(split_path_display("a/b/c.rs"), ("a/b/".into(), "c.rs".into()));
+        assert_eq!(
+            split_path_display("a/b/c.rs"),
+            ("a/b/".into(), "c.rs".into())
+        );
     }
 
     #[test]
@@ -99,7 +113,9 @@ mod tests {
     #[test]
     fn test_format_path_tooltip_long_path() {
         assert_eq!(
-            format_path_tooltip("Users/clyds/Projets/UltraFsCloud/ultracloudfs-admin/2026_saint_valentin_v2.xcf"),
+            format_path_tooltip(
+                "Users/clyds/Projets/UltraFsCloud/ultracloudfs-admin/2026_saint_valentin_v2.xcf"
+            ),
             "📂 Users/.../UltraFsCloud/ultracloudfs-admin/\n📄 2026_saint_valentin_v2.xcf"
         );
     }

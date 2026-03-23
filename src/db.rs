@@ -370,11 +370,8 @@ impl Database {
     /// Compte le nombre de fichiers indexés (utile pour détecter le premier lancement)
     pub fn count_files(&self) -> Result<usize> {
         let conn = self.inner.lock().unwrap();
-        let count: usize = conn.query_row(
-            "SELECT COUNT(*) FROM file_index",
-            [],
-            |row| row.get(0)
-        )?;
+        let count: usize =
+            conn.query_row("SELECT COUNT(*) FROM file_index", [], |row| row.get(0))?;
         Ok(count)
     }
 }

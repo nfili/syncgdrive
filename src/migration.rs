@@ -113,10 +113,7 @@ mod tests {
 
         assert_eq!(cfg.sync_pairs.len(), 1);
         assert_eq!(primary.name, "Sync principal");
-        assert_eq!(
-            primary.local_path.to_string_lossy(),
-            "/home/user/Sync"
-        );
+        assert_eq!(primary.local_path.to_string_lossy(), "/home/user/Sync");
         assert_eq!(primary.provider, "GoogleDrive");
     }
 }

@@ -122,10 +122,12 @@ impl ScanWindow {
 
         if total > 0 {
             self.progress.set_fraction(done as f64 / total as f64);
-            self.progress.set_text(Some(&format!("{} / {}", done, total)));
+            self.progress
+                .set_text(Some(&format!("{} / {}", done, total)));
         } else {
             self.progress.pulse();
-            self.progress.set_text(Some(&format!("{} éléments analysés...", done)));
+            self.progress
+                .set_text(Some(&format!("{} éléments analysés...", done)));
         }
     }
 }
@@ -133,7 +135,7 @@ impl ScanWindow {
 /// Affiche la fenêtre de scan et écoute les mises à jour du moteur.
 pub fn show_scan_window_in_app(
     app: &libadwaita::Application,
-    mut rx: tokio::sync::watch::Receiver<crate::engine::EngineStatus>
+    mut rx: tokio::sync::watch::Receiver<crate::engine::EngineStatus>,
 ) {
     // 1. On crée et on affiche la fenêtre immédiatement,
     // l'application GTK est déjà en cours d'exécution !
@@ -147,7 +149,12 @@ pub fn show_scan_window_in_app(
         while rx.changed().await.is_ok() {
             let status = rx.borrow().clone();
             match status {
-                crate::engine::EngineStatus::ScanProgress { phase, done, total, current } => {
+                crate::engine::EngineStatus::ScanProgress {
+                    phase,
+                    done,
+                    total,
+                    current,
+                } => {
                     let phase_name = match phase {
                         crate::engine::ScanPhase::RemoteListing => "Analyse de Google Drive",
                         crate::engine::ScanPhase::LocalListing => "Inventaire du disque local",

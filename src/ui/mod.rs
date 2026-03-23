@@ -1,11 +1,11 @@
 use gtk4::prelude::*;
 use tokio::sync::mpsc;
 
-pub mod settings;
-pub mod tray;
+pub mod help_window;
 pub mod icons;
 pub mod scan_window;
-pub mod help_window;
+pub mod settings;
+pub mod tray;
 
 pub use tray::spawn_tray;
 
@@ -16,7 +16,9 @@ pub enum UiCommand {
     ShowScanWindow,
 }
 
-pub fn start_ui_server(cmd_tx: tokio::sync::mpsc::Sender<crate::engine::EngineCommand>) -> mpsc::UnboundedSender<UiCommand> {
+pub fn start_ui_server(
+    cmd_tx: tokio::sync::mpsc::Sender<crate::engine::EngineCommand>,
+) -> mpsc::UnboundedSender<UiCommand> {
     let (ui_tx, ui_rx) = mpsc::unbounded_channel::<UiCommand>();
 
     std::thread::spawn(move || {
@@ -31,7 +33,8 @@ pub fn start_ui_server(cmd_tx: tokio::sync::mpsc::Sender<crate::engine::EngineCo
             // Tu peux choisir :
             // – ColorScheme::PreferDark (Force le thème sombre, très élégant)
             // - ColorScheme::Default (Suit le mode clair/sombre du système de manière dynamique).
-            libadwaita::StyleManager::default().set_color_scheme(libadwaita::ColorScheme::PreferDark);
+            libadwaita::StyleManager::default()
+                .set_color_scheme(libadwaita::ColorScheme::PreferDark);
         });
 
         let rx_rc = std::rc::Rc::new(std::cell::RefCell::new(Some(ui_rx)));
@@ -56,10 +59,21 @@ pub fn start_ui_server(cmd_tx: tokio::sync::mpsc::Sender<crate::engine::EngineCo
                     while let Some(cmd) = rx.recv().await {
                         tracing::info!("GTK: Commande reçue depuis le menu !");
                         match cmd {
-                            UiCommand::ShowHelp => crate::ui::help_window::show_help_in_app(&app_clone,cmd_tx_clone.clone()),
-                            UiCommand::ShowSettings => crate::ui::settings::show_settings_in_app(&app_clone, cmd_tx_clone.clone()),
+                            UiCommand::ShowHelp => crate::ui::help_window::show_help_in_app(
+                                &app_clone,
+                                cmd_tx_clone.clone(),
+                            ),
+                            UiCommand::ShowSettings => crate::ui::settings::show_settings_in_app(
+                                &app_clone,
+                                cmd_tx_clone.clone(),
+                            ),
                             UiCommand::ShowAbout => crate::ui::tray::show_about_in_app(&app_clone),
-                            UiCommand::ShowScanWindow => crate::ui::scan_window::show_scan_window_in_app(&app_clone, crate::ui::tray::get_scan_rx()),
+                            UiCommand::ShowScanWindow => {
+                                crate::ui::scan_window::show_scan_window_in_app(
+                                    &app_clone,
+                                    crate::ui::tray::get_scan_rx(),
+                                )
+                            }
                         }
                     }
                     tracing::info!("GTK: Canal de communication fermé.");

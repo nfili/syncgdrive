@@ -9,15 +9,18 @@ use tokio_util::sync::CancellationToken;
 
 use crate::config::AppConfig;
 use crate::engine::{EngineCommand, EngineStatus, ScanPhase};
-use crate::ui::icons::{TrayIcon, get_icon_pixmap};
+use crate::ui::icons::{get_icon_pixmap, TrayIcon};
 
 use gtk4::prelude::*;
 
 // ── Canal global pour diffuser le statut à la fenêtre de Scan ───────────────
-static SCAN_TX: std::sync::OnceLock<tokio::sync::watch::Sender<EngineStatus>> = std::sync::OnceLock::new();
+static SCAN_TX: std::sync::OnceLock<tokio::sync::watch::Sender<EngineStatus>> =
+    std::sync::OnceLock::new();
 
 pub fn get_scan_rx() -> tokio::sync::watch::Receiver<EngineStatus> {
-    SCAN_TX.get_or_init(|| tokio::sync::watch::channel(EngineStatus::Starting(0)).0).subscribe()
+    SCAN_TX
+        .get_or_init(|| tokio::sync::watch::channel(EngineStatus::Starting(0)).0)
+        .subscribe()
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -59,7 +62,8 @@ pub fn spawn_tray(
         match tray.spawn().await {
             Ok(handle) => {
                 tracing::info!("systray prêt (SVG Animé)");
-                let mut animation_tick = tokio::time::interval(std::time::Duration::from_millis(200));
+                let mut animation_tick =
+                    tokio::time::interval(std::time::Duration::from_millis(200));
 
                 loop {
                     tokio::select! {
@@ -169,14 +173,14 @@ impl ksni::Tray for SyncTray {
                 } else {
                     TrayIcon::Scanning(0)
                 }
-            },
+            }
             EngineStatus::SyncProgress { .. } | EngineStatus::Syncing { .. } => {
                 if self.is_animating {
                     TrayIcon::Sync(self.animation_frame)
                 } else {
                     TrayIcon::Sync(0)
                 }
-            },
+            }
             EngineStatus::Paused => TrayIcon::Paused,
             EngineStatus::Error(_) => TrayIcon::Error,
             EngineStatus::Stopped => TrayIcon::Offline,
@@ -196,18 +200,27 @@ impl ksni::Tray for SyncTray {
             EngineStatus::Starting(p) => format!("SyncGDrive — Démarrage ({}%)…", p),
             EngineStatus::Unconfigured(_) => "SyncGDrive — Configuration requise".into(),
             EngineStatus::Idle => "SyncGDrive — Surveillance active".into(),
-            EngineStatus::ScanProgress { phase, done, total, .. } => {
+            EngineStatus::ScanProgress {
+                phase, done, total, ..
+            } => {
                 let label = match phase {
                     ScanPhase::RemoteListing => "Analyse Drive",
                     ScanPhase::LocalListing => "Analyse locale",
                     ScanPhase::Directories => "Création dossiers",
                     ScanPhase::Comparing => "Comparaison",
                 };
-                if *total > 0 { format!("SyncGDrive — {label} {done}/{total}") }
-                else if *done > 0 { format!("SyncGDrive — {label} ({done})") }
-                else { format!("SyncGDrive — {label}…") }
+                if *total > 0 {
+                    format!("SyncGDrive — {label} {done}/{total}")
+                } else if *done > 0 {
+                    format!("SyncGDrive — {label} ({done})")
+                } else {
+                    format!("SyncGDrive — {label}…")
+                }
             }
-            EngineStatus::SyncProgress(snap) => format!("SyncGDrive — ↑ {}/{} {}", snap.done_files, snap.total_files, snap.current_name),
+            EngineStatus::SyncProgress(snap) => format!(
+                "SyncGDrive — ↑ {}/{} {}",
+                snap.done_files, snap.total_files, snap.current_name
+            ),
             EngineStatus::Syncing { active } => format!("SyncGDrive — {active} transfert(s)"),
             EngineStatus::Paused => "SyncGDrive — ⏸ En pause".into(),
             EngineStatus::Error(_) => "SyncGDrive — Erreur".into(),
@@ -229,15 +242,35 @@ impl ksni::Tray for SyncTray {
             ),
             EngineStatus::Idle => {
                 let cfg = self.config.lock().unwrap();
-                let last = if self.last_synced.is_empty() { String::new() } else { format!("\n✅ Dernier transfert : {}", self.last_synced) };
-                let local_disp = cfg.sync_pairs.first().map(|p| p.local_path.display().to_string()).unwrap_or_else(|| "Non configuré".into());
-                let remote_disp = cfg.sync_pairs.first().map(|p| p.remote_folder_id.clone()).unwrap_or_else(|| "Aucun".into());
+                let last = if self.last_synced.is_empty() {
+                    String::new()
+                } else {
+                    format!("\n✅ Dernier transfert : {}", self.last_synced)
+                };
+                let local_disp = cfg
+                    .sync_pairs
+                    .first()
+                    .map(|p| p.local_path.display().to_string())
+                    .unwrap_or_else(|| "Non configuré".into());
+                let remote_disp = cfg
+                    .sync_pairs
+                    .first()
+                    .map(|p| p.remote_folder_id.clone())
+                    .unwrap_or_else(|| "Aucun".into());
                 (
                     "SyncGDrive — Surveillance active".into(),
-                    format!("Surveillance active — Dossier à jour.\n{} → {}{}", local_disp, remote_disp, last),
+                    format!(
+                        "Surveillance active — Dossier à jour.\n{} → {}{}",
+                        local_disp, remote_disp, last
+                    ),
                 )
             }
-            EngineStatus::ScanProgress { phase, done, total, current } => {
+            EngineStatus::ScanProgress {
+                phase,
+                done,
+                total,
+                current,
+            } => {
                 let (_, clean_name) = crate::utils::path_display::split_path_display(current);
                 match phase {
                     ScanPhase::RemoteListing => (
@@ -245,23 +278,42 @@ impl ksni::Tray for SyncTray {
                         format!("Analyse Google Drive en cours…\n(Lecture de : {clean_name})"),
                     ),
                     ScanPhase::LocalListing => {
-                        let detail = if *done > 0 { format!("({done} éléments indexés)") } else { format!("({clean_name})") };
-                        ("SyncGDrive — Analyse locale".into(), format!("Analyse du disque local…\n{detail}"))
+                        let detail = if *done > 0 {
+                            format!("({done} éléments indexés)")
+                        } else {
+                            format!("({clean_name})")
+                        };
+                        (
+                            "SyncGDrive — Analyse locale".into(),
+                            format!("Analyse du disque local…\n{detail}"),
+                        )
                     }
                     ScanPhase::Directories => {
-                        let pct = if *total > 0 { (*done as f64 / *total as f64) * 100.0 } else { 0.0 };
+                        let pct = if *total > 0 {
+                            (*done as f64 / *total as f64) * 100.0
+                        } else {
+                            0.0
+                        };
                         let bar = progress_bar(pct, 10);
                         ("SyncGDrive — Création dossiers".into(), format!("Création de l'arborescence : {pct:.0}% {bar}\nDossier : {clean_name}\n({done} sur {total} créés)"))
                     }
                     ScanPhase::Comparing => {
-                        let pct = if *total > 0 { (*done as f64 / *total as f64) * 100.0 } else { 0.0 };
+                        let pct = if *total > 0 {
+                            (*done as f64 / *total as f64) * 100.0
+                        } else {
+                            0.0
+                        };
                         let bar = progress_bar(pct, 10);
                         ("SyncGDrive — Comparaison".into(), format!("Comparaison avec la base de données… {pct:.0}% {bar}\n({done}/{total} fichiers analysés)"))
                     }
                 }
             }
             EngineStatus::SyncProgress(snap) => {
-                let global_pct = if snap.total_bytes > 0 { ((snap.sent_bytes as f64 / snap.total_bytes as f64) * 100.0).clamp(0.0, 100.0) } else { 0.0 };
+                let global_pct = if snap.total_bytes > 0 {
+                    ((snap.sent_bytes as f64 / snap.total_bytes as f64) * 100.0).clamp(0.0, 100.0)
+                } else {
+                    0.0
+                };
                 let bar = progress_bar(global_pct, 15); // Barre plus courte pour intégration parfaite avec le texte
 
                 // NOUVEAU : Formatage du chemin sur 2 lignes avec emojis
@@ -270,7 +322,8 @@ impl ksni::Tray for SyncTray {
                 } else {
                     format!("{}/{}", snap.current_dir, snap.current_name)
                 };
-                let formatted_path = crate::utils::path_display::format_path_tooltip(&full_rel_path);
+                let formatted_path =
+                    crate::utils::path_display::format_path_tooltip(&full_rel_path);
 
                 let current_idx = (snap.done_files + 1).min(snap.total_files);
 
@@ -278,13 +331,28 @@ impl ksni::Tray for SyncTray {
                     format!("Transfert {}/{}", current_idx, snap.total_files),
                     format!(
                         "{}\n{} {:.0}% · {}/s · {}\nTotal : {} / {}",
-                        formatted_path, bar, global_pct, human_size(snap.speed_bps), snap.eta_string, human_size(snap.sent_bytes), human_size(snap.total_bytes)
+                        formatted_path,
+                        bar,
+                        global_pct,
+                        human_size(snap.speed_bps),
+                        snap.eta_string,
+                        human_size(snap.sent_bytes),
+                        human_size(snap.total_bytes)
                     ),
                 )
             }
-            EngineStatus::Syncing { active } => (format!("SyncGDrive — {active} transfert(s) en cours"), "Transferts vers Google Drive…".into()),
-            EngineStatus::Paused => ("SyncGDrive — ⏸ En pause".into(), "Moteur suspendu.\n(Ouvrez le menu contextuel pour reprendre)".into()),
-            EngineStatus::Error(e) => ("SyncGDrive — Erreur".into(), format!("{e}\nVérifiez les logs ou les tokens KIO.")),
+            EngineStatus::Syncing { active } => (
+                format!("SyncGDrive — {active} transfert(s) en cours"),
+                "Transferts vers Google Drive…".into(),
+            ),
+            EngineStatus::Paused => (
+                "SyncGDrive — ⏸ En pause".into(),
+                "Moteur suspendu.\n(Ouvrez le menu contextuel pour reprendre)".into(),
+            ),
+            EngineStatus::Error(e) => (
+                "SyncGDrive — Erreur".into(),
+                format!("{e}\nVérifiez les logs ou les tokens KIO."),
+            ),
             EngineStatus::Stopped => ("SyncGDrive — Arrêté".into(), "Le moteur est arrêté.".into()),
             EngineStatus::Settings => (
                 "SyncGDrive — Paramètres".into(),
@@ -295,7 +363,11 @@ impl ksni::Tray for SyncTray {
                 "Synchronisatin en pause pendant l'affichage de la fenêtre.".into(),
             ),
         };
-        ksni::ToolTip { title, description, ..Default::default() }
+        ksni::ToolTip {
+            title,
+            description,
+            ..Default::default()
+        }
     }
 
     fn menu(&self) -> Vec<ksni::MenuItem<Self>> {
@@ -304,102 +376,186 @@ impl ksni::Tray for SyncTray {
 
         let is_active = matches!(
             status,
-            EngineStatus::ScanProgress { .. } | EngineStatus::SyncProgress { .. } | EngineStatus::Syncing { .. }
+            EngineStatus::ScanProgress { .. }
+                | EngineStatus::SyncProgress { .. }
+                | EngineStatus::Syncing { .. }
         );
 
         let is_paused = matches!(status, EngineStatus::Paused | EngineStatus::Settings);
 
         let mut items: Vec<ksni::MenuItem<Self>> = Vec::new();
-        items.push(StandardItem { label: self.title(), enabled: false, ..Default::default() }.into());
+        items.push(
+            StandardItem {
+                label: self.title(),
+                enabled: false,
+                ..Default::default()
+            }
+            .into(),
+        );
         items.push(MenuItem::Separator);
 
         if is_paused {
-            items.push(StandardItem {
-                label: "Reprendre la synchronisation".into(),
-                icon_name: "media-playback-start".into(),
-                activate: Box::new(|t: &mut Self| {
-                    let _ = t.cmd_tx.try_send(EngineCommand::Resume);
-                }), ..Default::default() }.into());
+            items.push(
+                StandardItem {
+                    label: "Reprendre la synchronisation".into(),
+                    icon_name: "media-playback-start".into(),
+                    activate: Box::new(|t: &mut Self| {
+                        let _ = t.cmd_tx.try_send(EngineCommand::Resume);
+                    }),
+                    ..Default::default()
+                }
+                .into(),
+            );
         } else if is_active {
-            items.push(StandardItem {
-                label: "Mettre en pause".into(),
-                icon_name: "media-playback-pause".into(),
-                activate: Box::new(|t: &mut Self| {
-                    let _ = t.cmd_tx.try_send(EngineCommand::Pause);
-                }), ..Default::default() }.into());
+            items.push(
+                StandardItem {
+                    label: "Mettre en pause".into(),
+                    icon_name: "media-playback-pause".into(),
+                    activate: Box::new(|t: &mut Self| {
+                        let _ = t.cmd_tx.try_send(EngineCommand::Pause);
+                    }),
+                    ..Default::default()
+                }
+                .into(),
+            );
         } else {
-            items.push(StandardItem {
-                label: "Synchroniser maintenant".into(),
-                icon_name: "emblem-synchronizing".into(),
-                activate: Box::new(|t: &mut Self| {
-                    let _ = t.cmd_tx.try_send(EngineCommand::ForceScan);
-                }), ..Default::default() }.into());
+            items.push(
+                StandardItem {
+                    label: "Synchroniser maintenant".into(),
+                    icon_name: "emblem-synchronizing".into(),
+                    activate: Box::new(|t: &mut Self| {
+                        let _ = t.cmd_tx.try_send(EngineCommand::ForceScan);
+                    }),
+                    ..Default::default()
+                }
+                .into(),
+            );
         }
 
         items.push(MenuItem::Separator);
-        let local = self.config.lock().unwrap().sync_pairs.first().map(|p| p.local_path.clone()).unwrap_or_default();
-        items.push(StandardItem {
-            label: "Ouvrir le dossier local".into(),
-            icon_name: "folder-open".into(),
-            activate: Box::new(move |_: &mut Self| {
-                let _ = std::process::Command::new("xdg-open").arg(&local).spawn();
-            }), ..Default::default() }.into());
+        let local = self
+            .config
+            .lock()
+            .unwrap()
+            .sync_pairs
+            .first()
+            .map(|p| p.local_path.clone())
+            .unwrap_or_default();
+        items.push(
+            StandardItem {
+                label: "Ouvrir le dossier local".into(),
+                icon_name: "folder-open".into(),
+                activate: Box::new(move |_: &mut Self| {
+                    let _ = std::process::Command::new("xdg-open").arg(&local).spawn();
+                }),
+                ..Default::default()
+            }
+            .into(),
+        );
 
-        let remote = self.config.lock().unwrap().sync_pairs.first().map(|p| p.remote_folder_id.clone()).unwrap_or_default();
-        items.push(StandardItem {
-            label: "Ouvrir Google Drive".into(),
-            icon_name: "folder-remote".into(),
-            activate: Box::new(move |_: &mut Self| {
-                let _ = std::process::Command::new("xdg-open").arg(format!("https://drive.google.com/drive/folders/{}", remote)).spawn();
-            }), ..Default::default() }.into());
+        let remote = self
+            .config
+            .lock()
+            .unwrap()
+            .sync_pairs
+            .first()
+            .map(|p| p.remote_folder_id.clone())
+            .unwrap_or_default();
+        items.push(
+            StandardItem {
+                label: "Ouvrir Google Drive".into(),
+                icon_name: "folder-remote".into(),
+                activate: Box::new(move |_: &mut Self| {
+                    let _ = std::process::Command::new("xdg-open")
+                        .arg(format!("https://drive.google.com/drive/folders/{}", remote))
+                        .spawn();
+                }),
+                ..Default::default()
+            }
+            .into(),
+        );
 
         items.push(MenuItem::Separator);
-        let label = if self.autostart { "Lancer au démarrage ✓" } else { "Lancer au démarrage" };
-        items.push(StandardItem {
-            label: label.into(),
-            icon_name: "system-run".into(),
-            activate: Box::new(|t: &mut Self| {
-                t.autostart = !t.autostart;
-                toggle_autostart(t.autostart);
-            }), ..Default::default() }.into());
+        let label = if self.autostart {
+            "Lancer au démarrage ✓"
+        } else {
+            "Lancer au démarrage"
+        };
+        items.push(
+            StandardItem {
+                label: label.into(),
+                icon_name: "system-run".into(),
+                activate: Box::new(|t: &mut Self| {
+                    t.autostart = !t.autostart;
+                    toggle_autostart(t.autostart);
+                }),
+                ..Default::default()
+            }
+            .into(),
+        );
 
-        items.push(StandardItem {
-            label: "Réglages…".into(),
-            icon_name: "preferences-system".into(),
-            activate: Box::new(|t: &mut Self| {
-                let _ = t.ui_tx.send(crate::ui::UiCommand::ShowSettings);
-            }), ..Default::default() }.into());
+        items.push(
+            StandardItem {
+                label: "Réglages…".into(),
+                icon_name: "preferences-system".into(),
+                activate: Box::new(|t: &mut Self| {
+                    let _ = t.ui_tx.send(crate::ui::UiCommand::ShowSettings);
+                }),
+                ..Default::default()
+            }
+            .into(),
+        );
 
         let p = self.log_dir.clone();
-        items.push(StandardItem {
-            label: "Voir les logs".into(),
-            icon_name: "text-x-log".into(),
-            activate: Box::new(move |_: &mut Self| {
-                let _ = std::process::Command::new("xdg-open").arg(&p).spawn();
-            }), ..Default::default() }.into());
+        items.push(
+            StandardItem {
+                label: "Voir les logs".into(),
+                icon_name: "text-x-log".into(),
+                activate: Box::new(move |_: &mut Self| {
+                    let _ = std::process::Command::new("xdg-open").arg(&p).spawn();
+                }),
+                ..Default::default()
+            }
+            .into(),
+        );
 
-        items.push(StandardItem {
-            label: "Aide & Configuration".into(),
-            icon_name: "help-contents".into(),
-            activate: Box::new(|t: &mut Self| {
-                let _ = t.ui_tx.send(crate::ui::UiCommand::ShowHelp);
-            }), ..Default::default() }.into());
+        items.push(
+            StandardItem {
+                label: "Aide & Configuration".into(),
+                icon_name: "help-contents".into(),
+                activate: Box::new(|t: &mut Self| {
+                    let _ = t.ui_tx.send(crate::ui::UiCommand::ShowHelp);
+                }),
+                ..Default::default()
+            }
+            .into(),
+        );
 
-        items.push(StandardItem {
-            label: "À propos".into(),
-            icon_name: "help-about".into(),
-            activate: Box::new(|t: &mut Self| {
-                let _ = t.ui_tx.send(crate::ui::UiCommand::ShowAbout);
-            }), ..Default::default() }.into());
+        items.push(
+            StandardItem {
+                label: "À propos".into(),
+                icon_name: "help-about".into(),
+                activate: Box::new(|t: &mut Self| {
+                    let _ = t.ui_tx.send(crate::ui::UiCommand::ShowAbout);
+                }),
+                ..Default::default()
+            }
+            .into(),
+        );
 
         items.push(MenuItem::Separator);
-        items.push(StandardItem {
-            label: "Quitter SyncGDrive".into(),
-            icon_name: "application-exit".into(),
-            activate: Box::new(|t: &mut Self| {
-                t.shutdown.cancel();
-                let _ = t.cmd_tx.try_send(EngineCommand::Shutdown);
-            }), ..Default::default() }.into());
+        items.push(
+            StandardItem {
+                label: "Quitter SyncGDrive".into(),
+                icon_name: "application-exit".into(),
+                activate: Box::new(|t: &mut Self| {
+                    t.shutdown.cancel();
+                    let _ = t.cmd_tx.try_send(EngineCommand::Shutdown);
+                }),
+                ..Default::default()
+            }
+            .into(),
+        );
 
         items
     }
@@ -420,19 +576,34 @@ fn human_size(bytes: u64) -> String {
     const KB: u64 = 1024;
     const MB: u64 = 1024 * KB;
     const GB: u64 = 1024 * MB;
-    if bytes >= GB { format!("{:.1} Go", bytes as f64 / GB as f64) }
-    else if bytes >= MB { format!("{:.1} Mo", bytes as f64 / MB as f64) }
-    else if bytes >= KB { format!("{:.0} Ko", bytes as f64 / KB as f64) }
-    else { format!("{bytes} o") }
+    if bytes >= GB {
+        format!("{:.1} Go", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{:.1} Mo", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{:.0} Ko", bytes as f64 / KB as f64)
+    } else {
+        format!("{bytes} o")
+    }
 }
 
 fn is_autostart_enabled() -> bool {
-    std::process::Command::new("systemctl").args(["--user", "is-enabled", "syncgdrive.service"]).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status().map(|s| s.success()).unwrap_or(false)
+    std::process::Command::new("systemctl")
+        .args(["--user", "is-enabled", "syncgdrive.service"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
 }
 
 fn toggle_autostart(enable: bool) {
     let action = if enable { "enable" } else { "disable" };
-    let _ = std::process::Command::new("systemctl").args(["--user", action, "syncgdrive.service"]).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status();
+    let _ = std::process::Command::new("systemctl")
+        .args(["--user", action, "syncgdrive.service"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
 }
 
 // ── Thread GTK unique et persistant ──────────────────────────────────────────

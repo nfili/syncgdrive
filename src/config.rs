@@ -394,7 +394,10 @@ mod tests {
         assert!(!migrated);
         assert_eq!(cfg.max_workers, 8);
         assert_eq!(cfg.sync_pairs.len(), 1);
-        let primary = cfg.get_primary_pair().context("Pas de paire active").unwrap();
+        let primary = cfg
+            .get_primary_pair()
+            .context("Pas de paire active")
+            .unwrap();
         assert_eq!(primary.name, "Projets");
     }
 
@@ -408,11 +411,11 @@ mod tests {
         let (cfg, migrated) = AppConfig::parse_and_migrate(toml).unwrap();
         assert!(migrated);
         assert_eq!(cfg.sync_pairs.len(), 1);
-        let primary = cfg.get_primary_pair().context("Pas de paire active").unwrap();
-        assert_eq!(
-            primary.local_path,
-            PathBuf::from("/home/user/OldV1")
-        );
+        let primary = cfg
+            .get_primary_pair()
+            .context("Pas de paire active")
+            .unwrap();
+        assert_eq!(primary.local_path, PathBuf::from("/home/user/OldV1"));
         assert_eq!(cfg.max_workers, 2); // Les autres champs sont préservés.
     }
 

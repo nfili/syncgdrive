@@ -80,6 +80,6 @@ pub mod ignore;
 pub mod migration;
 pub mod notif;
 pub mod remote;
-pub mod utils;
 #[cfg(feature = "ui")]
 pub mod ui;
+pub mod utils;

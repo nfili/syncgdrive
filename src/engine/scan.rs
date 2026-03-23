@@ -41,10 +41,7 @@ pub(crate) async fn run(
     });
 
     let t0 = std::time::Instant::now();
-    let remote_index = match provider
-        .list_remote(&primary.remote_folder_id)
-        .await
-    {
+    let remote_index = match provider.list_remote(&primary.remote_folder_id).await {
         Ok(idx) => {
             info!(
                 count = idx.files.len() + idx.dirs.len(),
@@ -136,8 +133,7 @@ pub(crate) async fn run(
         if shutdown.is_cancelled() {
             anyhow::bail!("shutdown: scan interrupted");
         }
-        let rel = dir_path
-            .strip_prefix(&primary.local_path)?;
+        let rel = dir_path.strip_prefix(&primary.local_path)?;
         let rel_str = rel.to_string_lossy().to_string();
 
         let dir_name = rel

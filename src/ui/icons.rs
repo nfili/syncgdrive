@@ -67,17 +67,17 @@ pub fn get_icon_pixmap(icon: TrayIcon) -> Vec<u8> {
         TrayIcon::Starting(percent) => {
             // Mappage ultra-précis selon tes intervalles (0, 15, 30, 45, 60, 75, 90, 100)
             let index = match percent {
-                0..=14  => 0, // Frame 1 : 0%
+                0..=14 => 0,  // Frame 1 : 0%
                 15..=29 => 1, // Frame 2 : 15%
                 30..=44 => 2, // Frame 3 : 30%
                 45..=59 => 3, // Frame 4 : 45%
                 60..=74 => 4, // Frame 5 : 60%
                 75..=89 => 5, // Frame 6 : 75%
                 90..=99 => 6, // Frame 7 : 90%
-                _       => 7, // Frame 8 : 100% (et sécurité au-delà)
+                _ => 7,       // Frame 8 : 100% (et sécurité au-delà)
             };
             ICON_STARTING_FRAMES[index]
-        },
+        }
         TrayIcon::Scanning(frame) => ICON_SCAN_FRAMES[frame % ICON_SCAN_FRAMES.len()],
         TrayIcon::Offline => ICON_OFFLINE,
         TrayIcon::Error => ICON_ERROR,

@@ -77,7 +77,10 @@ impl GoogleAuth {
         let token_response = match token_result {
             Ok(res) => res,
             Err(e) => {
-                tracing::warn!("⚠️ Le jeton de rafraîchissement a été rejeté (révoqué ou expiré) : {}", e);
+                tracing::warn!(
+                    "⚠️ Le jeton de rafraîchissement a été rejeté (révoqué ou expiré) : {}",
+                    e
+                );
                 tracing::info!("Suppression du jeton local corrompu...");
 
                 // 1. On nettoie le fichier chiffré qui ne fonctionne plus
@@ -92,7 +95,8 @@ impl GoogleAuth {
                 tracing::info!("🌐 Ouverture du navigateur pour re-connexion...");
 
                 // 3. On force la nouvelle authentification !
-                let new_tokens = crate::auth::oauth2::authenticate(&self.creds).await
+                let new_tokens = crate::auth::oauth2::authenticate(&self.creds)
+                    .await
                     .context("Échec de la nouvelle authentification via le navigateur")?;
 
                 // 4. On sauvegarde et on renvoie le nouveau jeton tout neuf
@@ -110,9 +114,9 @@ impl GoogleAuth {
                 .unwrap_or(tokens.refresh_token), // On garde l'ancien si pas de nouveau
             expires_at: chrono::Utc::now().timestamp()
                 + token_response
-                .expires_in()
-                .map(|d| d.as_secs())
-                .unwrap_or(3599) as i64,
+                    .expires_in()
+                    .map(|d| d.as_secs())
+                    .unwrap_or(3599) as i64,
             scope: tokens.scope.clone(),
         };
 

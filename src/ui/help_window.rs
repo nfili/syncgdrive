@@ -1,10 +1,12 @@
+use crate::engine::EngineCommand;
 use gtk4::prelude::*;
 use libadwaita::prelude::*;
-use crate::engine::EngineCommand;
 
 // NOUVEAU : On ne crée plus l'application ici, on la reçoit du Serveur UI !
-pub fn show_help_in_app(app: &libadwaita::Application, cmd_tx: tokio::sync::mpsc::Sender<crate::engine::EngineCommand>) {
-
+pub fn show_help_in_app(
+    app: &libadwaita::Application,
+    cmd_tx: tokio::sync::mpsc::Sender<crate::engine::EngineCommand>,
+) {
     let _ = cmd_tx.try_send(EngineCommand::OpenHelp);
 
     let window = libadwaita::Window::builder()
