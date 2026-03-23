@@ -1,5 +1,24 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
-    <path d="M10 4H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z" fill="#BDC3C7"/>
-    <path d="M12 9l-4 7h8l-4-7z" fill="#E74C3C" stroke="#FFFFFF" stroke-width="1"/>
-    <path d="M12 11v2m0 1h.01" stroke="#FFFFFF" stroke-width="1.5" stroke-linecap="round"/>
+    <defs>
+        <linearGradient id="folderGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+            <stop offset="0%" stop-color="#42A5F5"/>
+            <stop offset="100%" stop-color="#1565C0"/>
+        </linearGradient>
+        <filter id="dropShadow" x="-50%" y="-50%" width="200%" height="200%">
+            <feDropShadow dx="0" dy="1.5" stdDeviation="0.8" flood-color="#000000" flood-opacity="0.25"/>
+        </filter>
+    </defs>
+
+
+    <g transform="scale(1.18) translate(-1.8, -1)">
+        <path d="M10 4H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z"
+              fill="url(#folderGrad)"
+              filter="url(#dropShadow)"
+        />
+    </g>
+
+    <g transform="scale(1.8) translate(-5.3, -5.2)" filter="URL(#dropShadow)">
+        <path d="M12 9l-4 7h8l-4-7z" fill="#E74C3C" stroke="#FFFFFF" stroke-width="0.5"/>
+        <path d="M12 11.6v1.5m0 1.5h.01" stroke="#FFFFFF" stroke-width="1" stroke-linecap="round"/>
+    </g>
 </svg>

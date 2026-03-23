@@ -14,9 +14,16 @@
               fill="url(#folderGrad)"
               filter="url(#dropShadow)"
         />
-    </g>
-    <g transform="scale(2) translate(-7.5, -6.8)" filter="URL(#dropShadow)">
-        <rect x="10" y="10" width="3" height="6" rx="1" fill="#F39C12" stroke="#FFFFFF" stroke-width="0.5"/>
-        <rect x="14" y="10" width="3" height="6" rx="1" fill="#F39C12" stroke="#FFFFFF" stroke-width="0.5"/>
+        <path d="M 10 10 a 1 1 0 0 1 4 0 c 0 2-2 2-2 4"
+              fill="none" stroke="darkblue"
+              stroke-width="2" stroke-linecap="round"/>
+        <circle cx="12" cy="17" r="1" fill="darkblue"
+                filter="url(#dropShadow)" />
+        <ellipse cx="11" cy="8" rx="1" ry="0.38" fill="none" stroke="white"
+                 stroke-width="0.75" stroke-linecap="round"
+                 filter="url(#dropShadow)"
+                 transform="rotate(-30, 11, 8)"
+                 opacity="0.8"
+        />
     </g>
 </svg>

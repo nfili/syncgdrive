@@ -7,7 +7,7 @@ use tracing::{info, warn};
 
 use sync_g_drive::db::Database;
 use sync_g_drive::engine::{EngineCommand, EngineStatus, SyncEngine};
-use sync_g_drive::migration; // <-- Ajout de notre module de migration
+use sync_g_drive::migration; // ← Ajout de notre module de migration
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -41,7 +41,7 @@ async fn main() -> Result<()> {
     let cfg = migration::run_all_migrations(&config_path, db_path_buf)
         .context("Échec lors de la migration ou du chargement de la configuration")?;
 
-    // On considère que c'est un premier run si la config vient d'être créée (et n'a pas de paires)
+    // On considère que c'est un premier run si la config vient d'être créée (et n'a pas de paires).
     let is_first_run = !config_path.exists();
     let needs_config = cfg.validate().is_err();
 
@@ -51,7 +51,8 @@ async fn main() -> Result<()> {
         }
     } else {
         // Logs mis à jour pour la V2 (utilisation de la première paire)
-        let active_pair = &cfg.sync_pairs[0];
+        let primary = cfg.get_primary_pair().context("Pas de dossier")?;
+        let active_pair = &primary;
         info!(
             local = %active_pair.local_path.display(),
             remote_id = %active_pair.remote_folder_id,
@@ -61,14 +62,14 @@ async fn main() -> Result<()> {
 
     cleanup_old_logs(&log_dir, 7);
 
-    // La base de données a déjà été migrée par `run_all_migrations`, on l'ouvre simplement
+    // La base de données a déjà été migrée par 'run_all_migrations', on l'ouvre simplement
     let db = Database::open(db_path_buf).context("cannot open db")?;
 
     let (cmd_tx, cmd_rx) = mpsc::channel::<EngineCommand>(cfg.advanced.engine_channel_capacity);
     let (status_tx, status_rx) = mpsc::unbounded_channel::<EngineStatus>();
     let shutdown = CancellationToken::new();
 
-    let _ = status_tx.send(EngineStatus::Starting);
+    let _ = status_tx.send(EngineStatus::Starting(0));
 
     // ── Signal SIGINT/SIGTERM via self-pipe trick ─────────────────────────────
     let signal_fd = {
@@ -84,6 +85,8 @@ async fn main() -> Result<()> {
         }
         fds[0]
     };
+    #[cfg(feature = "ui")]
+    let ui_tx = sync_g_drive::ui::start_ui_server(cmd_tx.clone());
 
     // ── Moteur ────────────────────────────────────────────────────────────────
     let engine = if needs_config {
@@ -116,6 +119,7 @@ async fn main() -> Result<()> {
             is_first_run || needs_config,
             shutdown.clone(),
             log_dir,
+            ui_tx,
         )?;
     }
     #[cfg(not(feature = "ui"))]
@@ -123,7 +127,7 @@ async fn main() -> Result<()> {
         let _ = (cfg.clone(), log_dir, is_first_run);
         tokio::spawn(async move {
             let mut status_rx = status_rx;
-            while (status_rx.recv().await).is_some() {}
+            while status_rx.recv().await.is_some() {}
         });
     }
 
@@ -153,7 +157,7 @@ async fn main() -> Result<()> {
     std::process::exit(0);
 }
 
-// ── Self-pipe : write-end stocké en statique atomique ────────────────────────
+// ── Self-pipe : write end stocké en statique atomique ────────────────────────
 static SIGNAL_PIPE_WRITE: AtomicI32 = AtomicI32::new(-1);
 
 extern "C" fn signal_handler(_sig: libc::c_int) {
@@ -257,7 +261,7 @@ fn init_logging(log_dir: &std::path::Path) -> Result<tracing_appender::non_block
 
     // Restauration de TON format de temps précis
     let timer = time::format_description::parse("[hour]:[minute]:[second]").expect("time fmt");
-    let timer = tracing_subscriber::fmt::time::UtcTime::new(timer);
+    let timer = fmt::time::UtcTime::new(timer);
 
     let stdout = fmt::layer()
         .with_target(false)

@@ -109,13 +109,14 @@ mod tests {
         .unwrap();
 
         let cfg = migrate_config(f.path()).unwrap();
+        let primary = cfg.get_primary_pair().context("Aucun dossier").unwrap();
 
         assert_eq!(cfg.sync_pairs.len(), 1);
-        assert_eq!(cfg.sync_pairs[0].name, "Sync principal");
+        assert_eq!(primary.name, "Sync principal");
         assert_eq!(
-            cfg.sync_pairs[0].local_path.to_string_lossy(),
+            primary.local_path.to_string_lossy(),
             "/home/user/Sync"
         );
-        assert_eq!(cfg.sync_pairs[0].provider, "GoogleDrive");
+        assert_eq!(primary.provider, "GoogleDrive");
     }
 }

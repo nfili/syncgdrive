@@ -11,15 +11,6 @@ use tracing::info;
 
 // ── Valeurs par défaut (strictement selon 01_CONFIG_V2.md) ──────────────────
 
-fn default_ignore_patterns() -> Vec<String> {
-    vec![
-        "**/target/**".into(),
-        "**/.git/**".into(),
-        "**/node_modules/**".into(),
-        "**/.sqlx/**".into(),
-        "**/.idea/**".into(),
-    ]
-}
 fn default_max_workers() -> usize {
     4
 }
@@ -197,20 +188,18 @@ pub struct SyncPair {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AppConfig {
-    #[serde(default)]
-    pub sync_pairs: Vec<SyncPair>,
     #[serde(default = "default_max_workers")]
     pub max_workers: usize,
     #[serde(default)]
     pub notifications: bool,
     #[serde(default = "default_rescan_interval_min")]
     pub rescan_interval_min: u64,
-    #[serde(default = "default_ignore_patterns")]
-    pub ignore_patterns: Vec<String>,
     #[serde(default)]
     pub retry: RetryConfig,
     #[serde(default)]
     pub advanced: AdvancedConfig,
+    #[serde(default)]
+    pub sync_pairs: Vec<SyncPair>,
 }
 
 // ── Erreurs de validation ─────────────────────────────────────────────────────
@@ -361,6 +350,17 @@ impl AppConfig {
             pair.local_path = expand_tilde(&pair.local_path);
         }
     }
+
+    /// Helper V3 : Retourne le SyncPair correspondant à un chemin local donné.
+    pub fn get_pair_by_local_path(&self, path: &Path) -> Option<&SyncPair> {
+        self.sync_pairs.iter().find(|p| p.local_path == path)
+    }
+
+    /// Helper V2 : Retourne le premier SyncPair actif (Source de vérité actuelle).
+    /// Remplace tous les appels moches à `primary (cfg.get_primary_pair() = sync_pairs[0])`.
+    pub fn get_primary_pair(&self) -> Option<&SyncPair> {
+        self.sync_pairs.iter().find(|p| p.active)
+    }
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -394,7 +394,8 @@ mod tests {
         assert!(!migrated);
         assert_eq!(cfg.max_workers, 8);
         assert_eq!(cfg.sync_pairs.len(), 1);
-        assert_eq!(cfg.sync_pairs[0].name, "Projets");
+        let primary = cfg.get_primary_pair().context("Pas de paire active").unwrap();
+        assert_eq!(primary.name, "Projets");
     }
 
     #[test]
@@ -407,11 +408,12 @@ mod tests {
         let (cfg, migrated) = AppConfig::parse_and_migrate(toml).unwrap();
         assert!(migrated);
         assert_eq!(cfg.sync_pairs.len(), 1);
+        let primary = cfg.get_primary_pair().context("Pas de paire active").unwrap();
         assert_eq!(
-            cfg.sync_pairs[0].local_path,
+            primary.local_path,
             PathBuf::from("/home/user/OldV1")
         );
-        assert_eq!(cfg.max_workers, 2); // Les autres champs sont préservés
+        assert_eq!(cfg.max_workers, 2); // Les autres champs sont préservés.
     }
 
     #[test]
@@ -511,7 +513,7 @@ mod tests {
 
         // La valeur modifiée est bien prise en compte
         assert_eq!(cfg.advanced.debounce_ms, 150);
-        // Les valeurs non spécifiées gardent les défauts (ex: 1024 pour le channel)
+        // Les valeurs non spécifiées gardent les défauts (ex : 1024 pour le channel).
         assert_eq!(cfg.advanced.engine_channel_capacity, 1024);
     }
 }

@@ -1,65 +1,54 @@
 use std::sync::{Arc, Mutex};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use gtk4::prelude::*;
 use libadwaita::prelude::*;
 
 use crate::config::AppConfig;
 use crate::engine::EngineCommand;
-
 // ── Standalone runner ─────────────────────────────────────────────────────────
 
-/// Lance la fenêtre Settings de façon autonome.
-/// Bloque jusqu'à fermeture de la fenêtre, puis GTK se termine proprement.
-///
-/// **Pré-requis** : `libadwaita::init()` doit avoir été appelé sur ce thread
-/// (géré par le thread `gtk-ui` dans `tray.rs`).
-///
-/// **Pause/Resume** : envoie `Pause` à l'ouverture et `Resume` à la fermeture
-/// (que ce soit via Enregistrer ou la croix ✕).
-pub fn run_standalone(cmd_tx: tokio::sync::mpsc::Sender<EngineCommand>) -> Result<()> {
-    // Pause immédiate : le moteur arrête de traiter les tasks.
-    let _ = cmd_tx.try_send(EngineCommand::Pause);
+pub fn show_settings_in_app(
+    app: &libadwaita::Application,
+    cmd_tx: tokio::sync::mpsc::Sender<EngineCommand>
+) {
+    // 1. On met le moteur en pause
 
-    let app = gtk4::Application::builder()
-        .application_id("fr.clyds.syncgdrive.settings")
-        .flags(gtk4::gio::ApplicationFlags::NON_UNIQUE)
-        .build();
+
+    let (cfg, _) = match AppConfig::load_or_create() {
+        Ok(c) => c,
+        Err(_) => (AppConfig::default(), true),
+    };
+    let config = Arc::new(Mutex::new(cfg));
 
     let resume_tx = cmd_tx.clone();
-    app.connect_activate(move |app| {
-        let (cfg, _) = match AppConfig::load_or_create() {
-            Ok(c) => c,
-            Err(_) => (AppConfig::default(), true),
-        };
-        let config = Arc::new(Mutex::new(cfg));
-        let app2 = app.downgrade();
-        let tx = cmd_tx.clone();
-        let _ = open(Some(app), config, move |new_cfg| {
-            let _ = tx.try_send(EngineCommand::ApplyConfig(Arc::new(new_cfg)));
-            // Resume envoyé par le shutdown hook ci-dessous, pas ici.
-            if let Some(a) = app2.upgrade() {
-                a.quit();
-            }
-        });
+    let is_saved = std::rc::Rc::new(std::cell::Cell::new(false));
+    let is_saved_clone = is_saved.clone();
+
+    // 2. On ouvre la fenêtre
+    let win = open(app, config, move |new_cfg| {
+        is_saved_clone.set(true); // On note qu'on a cliqué sur Enregistrer
+        let _ = cmd_tx.try_send(EngineCommand::ApplyConfig(Arc::new(new_cfg)));
+    }).expect("Erreur création fenêtre réglages");
+
+    // 3. Si on ferme avec la croix sans enregistrer, on enlève la pause !
+    win.connect_close_request(move |_| {
+        if !is_saved.get() {
+            let _ = resume_tx.try_send(EngineCommand::Resume);
+        }
+        gtk4::glib::Propagation::Proceed
     });
 
-    app.run_with_args::<String>(&[]);
-
-    // La fenêtre est fermée (croix OU enregistrer) : reprendre la synchro.
-    let _ = resume_tx.try_send(EngineCommand::Resume);
-    Ok(())
+    win.present();
 }
 
 // ── Fenêtre Settings ──────────────────────────────────────────────────────────
 
-/// Ouvre la fenêtre Settings (libadwaita).
-/// `app` : application GTK parente (indispensable pour le main-loop).
 pub fn open<F>(
-    app: Option<&gtk4::Application>,
+    app: &libadwaita::Application,
     config: Arc<Mutex<AppConfig>>,
     on_save: F,
-) -> Result<()>
+) -> Result<libadwaita::Window>
 where
     F: Fn(AppConfig) + 'static,
 {
@@ -67,20 +56,18 @@ where
         .lock()
         .map_err(|_| anyhow::anyhow!("config mutex poisoned"))?
         .clone();
+    let primary = cfg.get_primary_pair().cloned().context("Pas de dossier configuré")?;
 
-    // ── Fenêtre ───────────────────────────────────────────────────────────────
     let mut win_builder = libadwaita::Window::builder()
         .title("SyncGDrive — Réglages")
         .default_width(580)
         .default_height(640);
-    if let Some(a) = app {
-        win_builder = win_builder.application(a);
-    }
+
+    win_builder = win_builder.application(app);
     let win = win_builder.build();
 
     let toast_overlay = libadwaita::ToastOverlay::new();
 
-    // Contenu scrollable pour que tout tienne même sur un petit écran.
     let scroll = gtk4::ScrolledWindow::builder()
         .hscrollbar_policy(gtk4::PolicyType::Never)
         .vexpand(true)
@@ -102,15 +89,13 @@ where
                 .first()
                 .map(|p| p.local_path.to_string_lossy().into_owned())
                 .unwrap_or_default()
-                .as_str(), // <--- On force explicitement en &str
+                .as_str(),
         )
         .build();
 
-    // Icône de validation live ✅/❌
     let local_status = gtk4::Image::builder().valign(gtk4::Align::Center).build();
     local_row.add_suffix(&local_status);
 
-    // Bouton parcourir pour le dossier local
     let local_browse_btn = gtk4::Button::builder()
         .icon_name("folder-open-symbolic")
         .valign(gtk4::Align::Center)
@@ -139,24 +124,22 @@ where
     }
 
     let remote_row = libadwaita::EntryRow::builder()
-        .title("URL distante (ex: gdrive:/MonDrive/Backup)")
+        .title("ID du dossier Google Drive (ex: 1oIpwg... ou 'root')")
         .text(
             cfg.sync_pairs
                 .first()
-                .map(|p| p.remote_folder_id.clone()) // <--- Correction : on pointe bien sur le remote_folder_id !
+                .map(|p| p.remote_folder_id.clone())
                 .unwrap_or_default()
-                .as_str(), // <--- On force explicitement en &str
+                .as_str(),
         )
         .build();
 
-    // Icône de validation live ✅/❌
     let remote_status = gtk4::Image::builder().valign(gtk4::Align::Center).build();
     remote_row.add_suffix(&remote_status);
-    // --- Getsion de AuthManager -------------------------------
+
     let auth_manager = crate::auth::GoogleAuth::new();
     let is_connected = auth_manager.is_locally_connected();
 
-    // --- NOUVEAU : Bouton d'authentification OAuth2 ---
     let btn_google = gtk4::Button::builder()
         .margin_top(12)
         .margin_bottom(12)
@@ -176,7 +159,6 @@ where
 
         let auth_row_init = auth_row.clone();
 
-        // Tâche en arrière-plan pour ne pas bloquer l'affichage de la fenêtre
         gtk4::glib::MainContext::default().spawn_local(async move {
             let (tx, rx) = tokio::sync::oneshot::channel();
 
@@ -204,54 +186,45 @@ where
     } else {
         btn_google.set_label("Lier");
         btn_google.add_css_class("suggested-action");
-        auth_row.set_subtitle("Lié un compte Google Drive");
+        auth_row.set_subtitle("Lier un compte Google Drive");
     }
 
     grp_paths.add(&auth_row);
 
-    // On clone l'overlay pour pouvoir afficher des Toasts (notifications in-app)
     let overlay_clone = toast_overlay.clone();
-
     let auth_row_closure = auth_row.clone();
 
     btn_google.connect_clicked(move |clicked_btn| {
         let auth = crate::auth::GoogleAuth::new();
 
         if auth.is_locally_connected() {
-            // --- ACTION : RÉVOQUER ---
             let btn_async = clicked_btn.clone();
             let auth_row_async = auth_row_closure.clone();
 
             gtk4::glib::MainContext::default().spawn_local(async move {
                 let (tx, rx) = tokio::sync::oneshot::channel();
-
-                // On isole l'appel réseau dans un thread dédié avec son propre runtime Tokio
                 std::thread::spawn(move || {
                     let rt = tokio::runtime::Runtime::new().expect("Erreur runtime Tokio");
                     let res = rt.block_on(async {
-                        // On instancie l'auth ici pour le thread
                         let local_auth = crate::auth::GoogleAuth::new();
                         local_auth.revoke_token().await
                     });
                     let _ = tx.send(res);
                 });
 
-                // On attend la réponse sur le thread GTK sans le bloquer
                 if let Ok(res) = rx.await {
                     match res {
                         Ok(_) => {
-                            auth_row_async.set_subtitle("Lier un compte Google Drive.");
+                            auth_row_async.set_subtitle("Lier un compte Google Drive");
                             btn_async.set_label("Lier");
                             btn_async.remove_css_class("destructive-action");
                             btn_async.add_css_class("suggested-action");
-                            tracing::info!("✅ Compte déconnecté avec succès.");
                         }
                         Err(e) => tracing::error!("Erreur lors de la déconnexion : {}", e),
                     }
                 }
             });
         } else {
-            // --- ACTION : CONNECTER ---
             clicked_btn.set_sensitive(false);
             clicked_btn.set_label("En attente du navigateur...");
 
@@ -263,8 +236,7 @@ where
                 let (tx, rx) = tokio::sync::oneshot::channel();
 
                 std::thread::spawn(move || {
-                    let rt =
-                        tokio::runtime::Runtime::new().expect("Erreur runtime Tokio temporaire");
+                    let rt = tokio::runtime::Runtime::new().expect("Erreur runtime Tokio temporaire");
                     let res = rt.block_on(async {
                         let creds = crate::auth::OAuthAppCredentials::default();
                         crate::auth::oauth2::authenticate(&creds).await
@@ -322,10 +294,8 @@ where
                         }
                     }
                     Err(e) => {
-                        auth_row_async.set_subtitle("Lier un compte Google Drive.");
+                        auth_row_async.set_subtitle("Lier un compte Google Drive");
                         btn_async.set_label("Lier");
-
-                        tracing::error!("Échec OAuth2: {}", e);
                         let toast = libadwaita::Toast::builder()
                             .title(format!("❌ Erreur : {}", e))
                             .timeout(7)
@@ -336,7 +306,6 @@ where
             });
         }
     });
-    // --- FIN DU BLOC OAUTH2 ---
 
     grp_paths.add(&local_row);
     grp_paths.add(&remote_row);
@@ -350,20 +319,17 @@ where
         .description("Dossiers et fichiers à ne pas synchroniser")
         .build();
 
-    // La ListBox stocke les patterns — chaque ligne = un pattern + bouton ❌
     let ignore_list = gtk4::ListBox::builder()
         .selection_mode(gtk4::SelectionMode::None)
         .css_classes(["boxed-list"])
         .build();
 
-    // Remplir avec les patterns existants
-    for pat in &cfg.ignore_patterns {
+    for pat in &primary.ignore_patterns {
         append_ignore_row(&ignore_list, pat);
     }
 
     grp_ignore.add(&ignore_list);
 
-    // ── Barre de boutons sous la liste ────────────────────────────────────────
     let btn_bar = gtk4::Box::builder()
         .orientation(gtk4::Orientation::Horizontal)
         .spacing(8)
@@ -371,7 +337,6 @@ where
         .halign(gtk4::Align::Start)
         .build();
 
-    // Bouton : ajouter un glob manuellement
     let btn_add_glob = gtk4::Button::builder()
         .icon_name("list-add-symbolic")
         .tooltip_text("Ajouter un pattern glob (ex: **/build/**)")
@@ -386,11 +351,10 @@ where
         });
     }
 
-    // Bouton : parcourir pour exclure (sélection multiple fichiers + dossiers)
     let btn_browse = gtk4::Button::builder()
         .icon_name("folder-open-symbolic")
         .label("Parcourir…")
-        .tooltip_text("Choisir des fichiers ou dossiers à exclure (sélection multiple)")
+        .tooltip_text("Choisir des fichiers ou dossiers à exclure")
         .build();
     {
         let list = ignore_list.clone();
@@ -450,16 +414,10 @@ where
         .margin_end(24)
         .build();
 
-    // ══════════════════════════════════════════════════════════════════════════
-    //  Validation live des champs (icônes ✅/❌ + grisage bouton)
-    // ══════════════════════════════════════════════════════════════════════════
-
-    // Validation initiale au chargement
     update_local_status(&local_row, &local_status);
     update_remote_status(&remote_row, &remote_status);
     update_save_sensitivity(&local_row, &remote_row, &btn_save);
 
-    // Callback : chaque frappe dans le champ local
     {
         let ls = local_status.clone();
         let lr = local_row.clone();
@@ -471,7 +429,6 @@ where
         });
     }
 
-    // Callback : chaque frappe dans le champ remote
     {
         let rs = remote_status.clone();
         let lr = local_row.clone();
@@ -483,7 +440,6 @@ where
         });
     }
 
-    // ── Assemblage ────────────────────────────────────────────────────────────
     scroll.set_child(Some(&page));
 
     let vbox = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
@@ -494,9 +450,6 @@ where
     toast_overlay.set_child(Some(&vbox));
     win.set_content(Some(&toast_overlay));
 
-    // ══════════════════════════════════════════════════════════════════════════
-    //  Handler : Enregistrer
-    // ══════════════════════════════════════════════════════════════════════════
     let local_row2 = local_row.clone();
     let remote_row2 = remote_row.clone();
     let ignore_list2 = ignore_list.clone();
@@ -508,6 +461,7 @@ where
         let local = local_row2.text().to_string();
         let remote = remote_row2.text().to_string();
         let patterns = collect_patterns(&ignore_list2);
+        let mut mut_primary = primary.clone();
 
         let mut new_cfg = config2.lock().unwrap().clone();
         if new_cfg.sync_pairs.is_empty() {
@@ -520,10 +474,10 @@ where
                 ignore_patterns: vec![],
             });
         } else {
-            new_cfg.sync_pairs[0].local_path = std::path::PathBuf::from(&local);
-            new_cfg.sync_pairs[0].remote_folder_id = remote;
+            mut_primary.local_path = std::path::PathBuf::from(&local);
+            mut_primary.remote_folder_id = remote;
         }
-        new_cfg.ignore_patterns = patterns;
+        mut_primary.ignore_patterns = patterns;
         new_cfg.max_workers = workers_row.value() as usize;
         new_cfg.notifications = notif_row.is_active();
 
@@ -551,14 +505,13 @@ where
     });
 
     win.present();
-    Ok(())
+    Ok(win)
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
 //  Helpers Validation Live
 // ══════════════════════════════════════════════════════════════════════════════
 
-/// Expand `~/…` vers le home réel (même logique que `config.rs`).
 fn settings_expand_tilde(text: &str) -> std::path::PathBuf {
     if text.starts_with("~/") || text == "~" {
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
@@ -568,7 +521,6 @@ fn settings_expand_tilde(text: &str) -> std::path::PathBuf {
     }
 }
 
-/// Vérifie si le champ local est valide (non vide + dossier existant).
 fn is_local_valid(text: &str) -> bool {
     if text.trim().is_empty() {
         return false;
@@ -577,12 +529,21 @@ fn is_local_valid(text: &str) -> bool {
     path.is_dir()
 }
 
-/// Vérifie si le champ remote est valide (protocole reconnu).
+/// NOUVEAU : Validation adaptée pour accepter les IDs Google Drive
 fn is_remote_valid(text: &str) -> bool {
     let text = text.trim();
     if text.is_empty() {
         return false;
     }
+    // Accepte le mot clé 'root'
+    if text == "root" {
+        return true;
+    }
+    // Accepte les IDs Google Drive typiques (plus de 15 caractères sans espace)
+    if !text.contains(' ') && text.len() > 15 {
+        return true;
+    }
+    // Accepte la rétrocompatibilité
     static SUPPORTED: &[&str] = &[
         "gdrive://",
         "gdrive:/",
@@ -594,7 +555,6 @@ fn is_remote_valid(text: &str) -> bool {
     SUPPORTED.iter().any(|p| text.starts_with(p))
 }
 
-/// Met à jour l'icône ✅/❌ du champ local.
 fn update_local_status(row: &libadwaita::EntryRow, icon: &gtk4::Image) {
     let text = row.text().to_string();
     if text.trim().is_empty() {
@@ -608,23 +568,20 @@ fn update_local_status(row: &libadwaita::EntryRow, icon: &gtk4::Image) {
     }
 }
 
-/// Met à jour l'icône ✅/❌ du champ remote.
 fn update_remote_status(row: &libadwaita::EntryRow, icon: &gtk4::Image) {
     let text = row.text().to_string();
     if text.trim().is_empty() {
         icon.set_icon_name(None);
+        icon.set_tooltip_text(None);
     } else if is_remote_valid(&text) {
         icon.set_icon_name(Some("emblem-ok-symbolic"));
-        icon.set_tooltip_text(Some("Protocole reconnu"));
+        icon.set_tooltip_text(Some("Identifiant ou chemin valide"));
     } else {
         icon.set_icon_name(Some("dialog-error-symbolic"));
-        icon.set_tooltip_text(Some(
-            "Protocole invalide (gdrive:/, smb://, sftp://, webdav://, ftp://)",
-        ));
+        icon.set_tooltip_text(Some("Veuillez entrer 'root' ou un ID Google Drive valide"));
     }
 }
 
-/// Grise ou active le bouton Enregistrer selon la validité des champs.
 fn update_save_sensitivity(
     local_row: &libadwaita::EntryRow,
     remote_row: &libadwaita::EntryRow,
@@ -638,7 +595,6 @@ fn update_save_sensitivity(
 //  Helpers Exclusions
 // ══════════════════════════════════════════════════════════════════════════════
 
-/// Ajoute une ligne dans la ListBox avec le pattern et un bouton supprimer.
 fn append_ignore_row(list: &gtk4::ListBox, pattern: &str) {
     let row = libadwaita::ActionRow::builder().title(pattern).build();
 
@@ -660,7 +616,6 @@ fn append_ignore_row(list: &gtk4::ListBox, pattern: &str) {
     list.append(&row);
 }
 
-/// Parcourt la ListBox et retourne tous les patterns non-vides.
 fn collect_patterns(list: &gtk4::ListBox) -> Vec<String> {
     let mut patterns = Vec::new();
     let mut idx = 0;
@@ -679,10 +634,6 @@ fn collect_patterns(list: &gtk4::ListBox) -> Vec<String> {
     patterns
 }
 
-/// Ouvre un FileDialog en sélection **multiple** pour choisir
-/// des fichiers ou dossiers à exclure d'un coup.
-/// On utilise `select_multiple_folders` car il permet aussi de sélectionner
-/// des éléments mixtes sur la plupart des implémentations GTK4 portal.
 fn browse_exclude(
     win: &libadwaita::Window,
     list: &gtk4::ListBox,
@@ -694,7 +645,6 @@ fn browse_exclude(
         .modal(true)
         .build();
 
-    // Positionne le dialogue dans le local_root si possible
     if !local_text.is_empty() {
         let path = std::path::Path::new(&local_text);
         if path.is_dir() {
@@ -724,13 +674,6 @@ fn browse_exclude(
     });
 }
 
-/// Convertit un chemin absolu en glob relatif.
-///
-/// Sous `local_root` :
-///   /home/user/Projets/UltraFs/target  →  **/target/**
-///   /home/user/Projets/UltraFs/foo.log →  **/foo.log
-///
-/// Hors `local_root` : utilise le nom seul.
 fn path_to_glob(local_root_text: &str, selected: &std::path::Path) -> String {
     let local_root = std::path::Path::new(local_root_text);
     let name = selected
@@ -751,7 +694,6 @@ fn path_to_glob(local_root_text: &str, selected: &std::path::Path) -> String {
         };
     }
 
-    // Hors du local_root : pattern par nom uniquement
     if selected.is_dir() {
         format!("**/{name}/**")
     } else {
@@ -759,7 +701,6 @@ fn path_to_glob(local_root_text: &str, selected: &std::path::Path) -> String {
     }
 }
 
-/// Dialogue pour saisir un glob manuellement.
 fn show_add_glob_dialog(
     win: &libadwaita::Window,
     list: &gtk4::ListBox,
@@ -814,7 +755,6 @@ fn show_add_glob_dialog(
         dlg2.close();
     });
 
-    // Validation par Entrée
     let btn_ok2 = btn_ok.clone();
     entry.connect_activate(move |_| {
         btn_ok2.emit_clicked();

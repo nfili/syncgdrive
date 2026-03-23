@@ -77,7 +77,7 @@ pub static ICONS: Lazy<IconSet> = Lazy::new(|| IconSet {
     paused: include_bytes!("../../assets/icons/syncgdrive-paused.svg"),
     error: include_bytes!("../../assets/icons/syncgdrive-error.svg"),
     offline: include_bytes!("../../assets/icons/syncgdrive-offline.svg"),
-    scan: include_bytes!("../../assets/icons/syncgdrive-scan.svg"),
+    scan: include_bytes!("../../assets/icons/syncgdrive-scan_1.svg"),
     sync_frames: [
         include_bytes!("../../assets/icons/syncgdrive-sync-0.svg"),
         include_bytes!("../../assets/icons/syncgdrive-sync-1.svg"),

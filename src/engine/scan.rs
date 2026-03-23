@@ -28,7 +28,8 @@ pub(crate) async fn run(
     status_tx: &mpsc::UnboundedSender<EngineStatus>,
     tracker: &Arc<ProgressTracker>,
 ) -> Result<()> {
-    info!(root = %cfg.sync_pairs[0].local_path.display(), "scan: start");
+    let primary = cfg.get_primary_pair().context("Aucun dossier")?;
+    info!(root = %primary.local_path.display(), "scan: start");
     notif::scan_started(cfg);
 
     // ── Phase 0 : listing récursif du remote (BFS GDrive) ──────────────────
@@ -41,7 +42,7 @@ pub(crate) async fn run(
 
     let t0 = std::time::Instant::now();
     let remote_index = match provider
-        .list_remote(&cfg.sync_pairs[0].remote_folder_id)
+        .list_remote(&primary.remote_folder_id)
         .await
     {
         Ok(idx) => {
@@ -85,17 +86,20 @@ pub(crate) async fn run(
     let mut local_files: Vec<PathBuf> = Vec::new();
     let mut local_count = 0usize;
 
-    for entry in WalkDir::new(&cfg.sync_pairs[0].local_path)
+    for entry in WalkDir::new(&primary.local_path)
         .into_iter()
         .filter_entry(|e| !ignore.is_ignored(e.path()))
         .filter_map(|e| e.ok())
     {
+        // 🌟 RESPIRATION POUR TOKIO : Rend l'interface instantanément réactive
+        tokio::task::yield_now().await;
+
         if shutdown.is_cancelled() {
             anyhow::bail!("shutdown: scan interrupted");
         }
         let path = entry.path().to_path_buf();
         if entry.file_type().is_dir() {
-            if let Ok(r) = path.strip_prefix(&cfg.sync_pairs[0].local_path) {
+            if let Ok(r) = path.strip_prefix(&primary.local_path) {
                 if !r.as_os_str().is_empty() {
                     local_dirs.push(path);
                 }
@@ -133,8 +137,7 @@ pub(crate) async fn run(
             anyhow::bail!("shutdown: scan interrupted");
         }
         let rel = dir_path
-            .strip_prefix(&cfg.sync_pairs[0].local_path)
-            .unwrap();
+            .strip_prefix(&primary.local_path)?;
         let rel_str = rel.to_string_lossy().to_string();
 
         let dir_name = rel
@@ -160,7 +163,7 @@ pub(crate) async fn run(
 
         // Crée chaque composant manquant
         let mut current_rel = String::new();
-        let mut current_parent = cfg.sync_pairs[0].remote_folder_id.clone();
+        let mut current_parent = primary.remote_folder_id.clone();
 
         for comp in rel.components() {
             let part = comp.as_os_str().to_string_lossy().to_string();
@@ -219,11 +222,14 @@ pub(crate) async fn run(
     let mut skipped_remote = 0usize;
 
     for (i, file_path) in local_files.iter().enumerate() {
+        // 🌟 RESPIRATION POUR TOKIO : Rend l'interface instantanément réactive
+        tokio::task::yield_now().await;
+
         if shutdown.is_cancelled() {
             anyhow::bail!("shutdown: scan interrupted");
         }
 
-        let rel = match file_path.strip_prefix(&cfg.sync_pairs[0].local_path) {
+        let rel = match file_path.strip_prefix(&primary.local_path) {
             Ok(r) => r.to_string_lossy().to_string(),
             Err(_) => continue,
         };
@@ -242,14 +248,14 @@ pub(crate) async fn run(
             });
         }
 
-        // NOUVEAU: On vérifie d'abord si le fichier existe vraiment sur Google Drive !
+        // NOUVEAU : On vérifie d'abord si le fichier existe vraiment sur Google Drive !
         let remote_exists = path_cache.lookup(&rel).await.is_some();
 
         if db_index.contains(&rel) && remote_exists {
             // <-- SÉCURITÉ ICI
             if let Ok(Some(entry)) = db.get(&rel) {
                 let mtime = mtime_of(file_path);
-                // On skip SEULEMENT si la date est bonne ET qu'il est sur le Drive
+                // On passe SEULEMENT si la date est bonne ET qu'il est sur le Drive
                 if mtime == entry.mtime {
                     skipped += 1;
                     continue;
@@ -267,7 +273,7 @@ pub(crate) async fn run(
                 }
             }
         } else if remote_exists {
-            // Il est sur le Drive mais pas dans notre DB (ou on l'a oublié)
+            // Il est sur le Drive, mais pas dans notre DB (ou on l'a oublié).
             if let Ok(hash) = hash_of(file_path).await {
                 let mtime = mtime_of(file_path);
                 let _ = db.upsert(&FileEntry {
@@ -318,7 +324,7 @@ pub(crate) async fn run(
         let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
 
         let _ = status_tx.send(EngineStatus::ScanProgress {
-            phase: crate::engine::ScanPhase::Comparing, // Indique qu'on est en train de comparer/préparer
+            phase: ScanPhase::Comparing, // Indique qu'on est en train de comparer/préparer
             done: i + 1,
             total: sync_total,
             current: file_name.clone(),
@@ -339,7 +345,7 @@ pub(crate) async fn run(
 
     let local_rel_set: HashSet<String> = local_files
         .iter()
-        .filter_map(|p| p.strip_prefix(&cfg.sync_pairs[0].local_path).ok())
+        .filter_map(|p| p.strip_prefix(&primary.local_path).ok())
         .map(|r| r.to_string_lossy().to_string())
         .collect();
 
@@ -351,7 +357,7 @@ pub(crate) async fn run(
                 anyhow::bail!("shutdown: scan interrupted");
             }
             if !local_rel_set.contains(db_path) {
-                let full_local = cfg.sync_pairs[0].local_path.join(db_path);
+                let full_local = primary.local_path.join(db_path);
                 tracker.total_files.fetch_add(1, Ordering::Relaxed);
                 if task_tx.send(Task::Delete(full_local)).await.is_err() {
                     anyhow::bail!("shutdown: task queue closed");
@@ -381,7 +387,7 @@ pub(crate) async fn run(
                 continue;
             }
 
-            let local_path = cfg.sync_pairs[0].local_path.join(rel);
+            let local_path = primary.local_path.join(rel);
             if local_path.is_dir() {
                 continue;
             }

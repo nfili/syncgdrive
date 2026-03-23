@@ -30,11 +30,13 @@ pub enum EngineCommand {
     ApplyConfig(Arc<AppConfig>),
     Pause,
     Resume,
+    OpenSettings,
+    OpenHelp,
 }
 
 #[derive(Debug, Clone)]
 pub enum EngineStatus {
-    Starting,
+    Starting(u8),
     Unconfigured(String),
     Idle,
     ScanProgress {
@@ -50,6 +52,8 @@ pub enum EngineStatus {
     Paused,
     Error(String),
     Stopped,
+    Settings,
+    Help,
 }
 
 #[derive(Debug, Clone)]
@@ -73,6 +77,47 @@ pub struct SyncEngine {
     cfg: Arc<AppConfig>,
 }
 
+macro_rules! await_scan_interruptible {
+    ($scan_call:expr, $shutdown:expr, $cmd_rx:expr, $status_tx:expr, $tracker:expr, $paused:ident, $rescan_on_resume:ident) => {
+        let mut fut = Box::pin($scan_call);
+        loop {
+            tokio::select! {
+                r = &mut fut => {
+                    if let Err(e) = r {
+                        if crate::engine::is_shutdown_err(&e) { $shutdown.cancel(); }
+                        else { let _ = $status_tx.send(EngineStatus::Error(e.to_string())); }
+                    } else if $tracker.total_files.load(std::sync::atomic::Ordering::Relaxed) == 0 {
+                        let _ = $status_tx.send(EngineStatus::Idle);
+                    }
+                    break;
+                }
+                _ = $shutdown.cancelled() => { break; }
+                maybe_cmd = $cmd_rx.recv() => {
+                    match maybe_cmd {
+                        Some(EngineCommand::Pause) => {
+                            $paused = true;
+                            $rescan_on_resume = true; // Pour reprendre plus tard
+                            let _ = $status_tx.send(EngineStatus::Paused);
+                            break; // Coupe le scan instantanément !
+                        }
+                        Some(EngineCommand::OpenSettings) => {
+                            $paused = true;
+                            $rescan_on_resume = true;
+                            let _ = $status_tx.send(EngineStatus::Settings);
+                            break; // Coupe le scan instantanément !
+                        }
+                        Some(EngineCommand::Shutdown) | None => {
+                            $shutdown.cancel();
+                            break;
+                        }
+                        _ => {} // On ignore les autres commandes (ex : ForceScan en double).
+                    }
+                }
+            }
+        }
+    };
+}
+
 impl SyncEngine {
     pub fn new(cfg: Arc<AppConfig>) -> Self {
         Self { cfg }
@@ -88,9 +133,15 @@ impl SyncEngine {
         use crate::auth::GoogleAuth;
         use crate::remote::gdrive::GDriveProvider;
 
+        let _ = status_tx.send(EngineStatus::Starting(25));
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
         let auth = Arc::new(GoogleAuth::new());
         let path_cache = Arc::new(PathCache::new());
         let config_arc = Arc::new(self.cfg.advanced.clone());
+
+        let _ = status_tx.send(EngineStatus::Starting(50));
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
 
         let provider: Arc<dyn RemoteProvider> = Arc::new(GDriveProvider::new(
             auth,
@@ -98,6 +149,9 @@ impl SyncEngine {
             config_arc,
             shutdown.clone(),
         )?);
+
+        let _ = status_tx.send(EngineStatus::Starting(75));
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
 
         self.run_with_provider(provider, path_cache, db, shutdown, cmd_rx, status_tx)
             .await
@@ -113,22 +167,19 @@ impl SyncEngine {
         status_tx: mpsc::UnboundedSender<EngineStatus>,
     ) -> Result<()> {
         let (task_tx, mut task_rx) = mpsc::channel::<Task>(1024);
-        let ignore = IgnoreMatcher::from_patterns(&self.cfg.ignore_patterns)?;
+        let primary = self.cfg.get_primary_pair().context("Aucun dossier n'est configuré!")?;
+        let ignore = IgnoreMatcher::from_patterns(&primary.ignore_patterns)?;
 
         let mut paused = false;
         let mut rescan_on_resume = false;
-        let tracker = Arc::new(crate::engine::bandwidth::ProgressTracker::new());
+        let tracker = Arc::new(ProgressTracker::new());
 
-        // NOUVEAU : Le drapeau atomique pour le mode Survie (Hors-Ligne)
         let is_offline = Arc::new(AtomicBool::new(false));
 
+        let _ = status_tx.send(EngineStatus::Starting(100));
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         {
             let _ = status_tx.send(EngineStatus::Syncing { active: 0 });
-            // Ouvre la fenêtre de progression si c'est le tout premier scan complet
-            if db.count_files().unwrap_or(0) == 0 {
-                #[cfg(feature = "ui")]
-                crate::ui::tray::show_scan_window();
-            }
             let scan = scan::run(
                 &self.cfg,
                 &db,
@@ -156,6 +207,20 @@ impl SyncEngine {
                                 paused = true;
                                 rescan_on_resume = true;
                                 let _ = status_tx.send(EngineStatus::Paused);
+                                break;
+                            }
+                            Some(EngineCommand::OpenSettings) => {
+                                info!("engine: settings opened during initial scan");
+                                paused = true;
+                                rescan_on_resume = true; // Il faudra reprendre le scan après
+                                let _ = status_tx.send(EngineStatus::Settings);
+                                break;
+                            }
+                            Some(EngineCommand::OpenHelp) => {
+                                info!("engine: help opened during initial scan");
+                                paused = true;
+                                rescan_on_resume = true; // Il faudra reprendre le scan après
+                                let _ = status_tx.send(EngineStatus::Help);
                                 break;
                             }
                             Some(EngineCommand::Shutdown) | None => {
@@ -190,13 +255,16 @@ impl SyncEngine {
         }
 
         let (watch_tx, watch_rx) = mpsc::channel(256);
-        let mut watcher = watcher::Watcher::start(&self.cfg.sync_pairs[0].local_path, watch_tx)?;
+        let primary = self.cfg.get_primary_pair().context("Aucun dossier n'est configuré!")?;
+
+        let mut watcher = watcher::Watcher::start(&primary.local_path, watch_tx)?;
 
         let task_tx_w = task_tx.clone();
         let sd_w = shutdown.clone();
-        let local_root = self.cfg.sync_pairs[0].local_path.clone();
 
-        // On passe le drapeau et la DB au dispatcher
+        // ── VARIABLE DYNAMIQUE POUR LE HOT-RELOAD ──
+        let mut current_local_root = primary.local_path.clone();
+
         spawn_debounced_dispatch(
             watch_rx,
             task_tx_w,
@@ -205,7 +273,7 @@ impl SyncEngine {
             tracker.clone(),
             is_offline.clone(),
             db.clone(),
-            local_root.clone(),
+            current_local_root.clone(),
         );
 
         let sem = Arc::new(Semaphore::new(self.cfg.max_workers.max(1)));
@@ -217,7 +285,6 @@ impl SyncEngine {
             shutdown.clone(),
         ));
 
-        // NOUVEAU : Le Tick de Santé (Health Check) toutes les 30s
         let mut health_tick = tokio::time::interval_at(
             tokio::time::Instant::now()
                 + std::time::Duration::from_secs(self.cfg.advanced.health_check_interval_secs),
@@ -236,6 +303,7 @@ impl SyncEngine {
                 tokio::select! {
                     biased;
                     _ = shutdown.cancelled() => { break; }
+
                     maybe_cmd = cmd_rx.recv() => {
                         match maybe_cmd {
                             Some(EngineCommand::Resume) => {
@@ -244,21 +312,16 @@ impl SyncEngine {
                                 if rescan_on_resume && !is_offline.load(Ordering::Relaxed) {
                                     rescan_on_resume = false;
                                     info!("engine: rescan after config change");
-                                    // Reset tracker...
                                     tracker.total_files.store(0, Ordering::Relaxed);
                                     let _ = status_tx.send(EngineStatus::Syncing { active: 0 });
-                                    let ig = IgnoreMatcher::from_patterns(&self.cfg.ignore_patterns)?;
-                                    tokio::select! {
-                                        r = scan::run(&self.cfg, &db, &ig, &provider, &path_cache, &task_tx, &shutdown, &status_tx, & tracker) => {
-                                            if let Err(e) = r {
-                                                if is_shutdown_err(&e) { shutdown.cancel(); break; }
-                                                let _ = status_tx.send(EngineStatus::Error(e.to_string()));
-                                            } else if tracker.total_files.load(Ordering::Relaxed) == 0 {
-                                                let _ = status_tx.send(EngineStatus::Idle);
-                                            }
-                                        }
-                                        _ = shutdown.cancelled() => { break; }
-                                    }
+
+                                    let current_primary = self.cfg.get_primary_pair().context("Aucun dossier")?;
+                                    let ig = IgnoreMatcher::from_patterns(&current_primary.ignore_patterns)?;
+
+                                    await_scan_interruptible!(
+                                        scan::run(&self.cfg, &db, &ig, &provider, &path_cache, &task_tx, &shutdown, &status_tx, &tracker),
+                                        shutdown, cmd_rx, status_tx, tracker, paused, rescan_on_resume
+                                    );
                                 }
                                 let _ = status_tx.send(EngineStatus::Idle);
                             }
@@ -267,21 +330,33 @@ impl SyncEngine {
                                 break;
                             }
                             Some(EngineCommand::ApplyConfig(new_cfg)) => {
-                                let root_changed = new_cfg.sync_pairs[0].local_path != self.cfg.sync_pairs[0].local_path;
-                                self.cfg = new_cfg;
+                                let new_primary = new_cfg.get_primary_pair().context("Aucun dossier n'est configuré!")?;
+                                let root_changed = new_primary.local_path != current_local_root;
+
+                                // On met à jour la vraie configuration du moteur
+                                self.cfg = new_cfg.clone();
                                 rescan_on_resume = true;
+
                                 if root_changed {
+                                    current_local_root = new_primary.local_path.clone();
                                     watcher.stop();
                                     db.clear()?;
                                     db.clear_dirs()?;
                                     let (tx2, rx2) = mpsc::channel(256);
-                                    watcher = watcher::Watcher::start(&self.cfg.sync_pairs[0].local_path, tx2)?;
+                                    watcher = watcher::Watcher::start(&current_local_root, tx2)?;
                                     spawn_debounced_dispatch(
                                         rx2, task_tx.clone(), shutdown.clone(), self.cfg.advanced.debounce_ms,
-                                        tracker.clone(), is_offline.clone(), db.clone(), self.cfg.sync_pairs[0].local_path.clone()
+                                        tracker.clone(), is_offline.clone(), db.clone(), current_local_root.clone()
                                     );
                                 }
                             }
+                            Some(EngineCommand::OpenSettings) => {
+                                // Le moteur est déjà en pause, on met juste à jour l'état visuel
+                                let _ = status_tx.send(EngineStatus::Settings);
+                            }
+                            Some(EngineCommand::OpenHelp) => {
+                                let _ = status_tx.send(EngineStatus::Help);
+                                }
                             _ => {}
                         }
                     }
@@ -308,58 +383,58 @@ impl SyncEngine {
                             if !is_offline.load(Ordering::Relaxed) {
                                 tracker.total_files.store(0, Ordering::Relaxed);
                                 let _ = status_tx.send(EngineStatus::Syncing { active: 0 });
-                                let ignore2 = IgnoreMatcher::from_patterns(&self.cfg.ignore_patterns)?;
-                                tokio::select! {
-                                    r = scan::run(&self.cfg, &db, &ignore2, &provider, &path_cache, &task_tx, &shutdown, &status_tx,&tracker) => {
-                                        if let Err(e) = r {
-                                            if is_shutdown_err(&e) { shutdown.cancel(); break; }
-                                            let _ = status_tx.send(EngineStatus::Error(e.to_string()));
-                                        } else if tracker.total_files.load(Ordering::Relaxed) == 0 {
-                                            let _ = status_tx.send(EngineStatus::Idle);
-                                        }
-                                    }
-                                    _ = shutdown.cancelled() => { break; }
-                                }
+
+                                let current_primary = self.cfg.get_primary_pair().context("Aucun dossier")?;
+                                let ignore2 = IgnoreMatcher::from_patterns(&current_primary.ignore_patterns)?;
+
+                                await_scan_interruptible!(
+                                    scan::run(&self.cfg, &db, &ignore2, &provider, &path_cache, &task_tx, &shutdown, &status_tx, &tracker),
+                                    shutdown, cmd_rx, status_tx, tracker, paused, rescan_on_resume
+                                );
                             }
                         }
                         Some(EngineCommand::ApplyConfig(new_cfg)) => {
-                            let root_changed = new_cfg.sync_pairs[0].local_path != self.cfg.sync_pairs[0].local_path;
-                            self.cfg = new_cfg;
+                            let new_primary = new_cfg.get_primary_pair().context("Pas de dossier")?;
+                            let root_changed = new_primary.local_path != current_local_root;
+
+                            // On met à jour la vraie configuration du moteur
+                            self.cfg = new_cfg.clone();
 
                             if root_changed {
+                                current_local_root = new_primary.local_path.clone();
                                 watcher.stop();
                                 db.clear()?;
                                 db.clear_dirs()?;
                                 let (tx2, rx2) = mpsc::channel(256);
-                                watcher = watcher::Watcher::start(&self.cfg.sync_pairs[0].local_path, tx2)?;
+                                watcher = watcher::Watcher::start(&current_local_root, tx2)?;
                                 spawn_debounced_dispatch(
                                     rx2, task_tx.clone(), shutdown.clone(), self.cfg.advanced.debounce_ms,
-                                    tracker.clone(), is_offline.clone(), db.clone(), self.cfg.sync_pairs[0].local_path.clone()
+                                    tracker.clone(), is_offline.clone(), db.clone(), current_local_root.clone()
                                 );
 
                                 if !is_offline.load(Ordering::Relaxed) {
-                                    let ignore3 = IgnoreMatcher::from_patterns(&self.cfg.ignore_patterns)?;
+                                    let ignore3 = IgnoreMatcher::from_patterns(&new_primary.ignore_patterns)?;
                                     tracker.total_files.store(0, Ordering::Relaxed);
                                     let _ = status_tx.send(EngineStatus::Syncing { active: 0 });
-                                    tokio::select! {
-                                        r = scan::run(&self.cfg, &db, &ignore3, &provider, &path_cache, &task_tx, &shutdown, &status_tx,&tracker) => {
-                                            if let Err(e) = r {
-                                                if is_shutdown_err(&e) { shutdown.cancel(); break; }
-                                                let _ = status_tx.send(EngineStatus::Error(e.to_string()));
-                                            } else if tracker.total_files.load(Ordering::Relaxed) == 0 {
-                                                let _ = status_tx.send(EngineStatus::Idle);
-                                            }
-                                        }
-                                        _ = shutdown.cancelled() => { break; }
-                                    }
+                                    await_scan_interruptible!(
+                                        scan::run(&self.cfg, &db, &ignore3, &provider, &path_cache, &task_tx, &shutdown, &status_tx, &tracker),
+                                        shutdown, cmd_rx, status_tx, tracker, paused, rescan_on_resume
+                                    );
                                 }
                             }
                             let _ = status_tx.send(EngineStatus::Idle);
                         }
+                        Some(EngineCommand::OpenHelp) => {
+                            paused = true;
+                            let _ = status_tx.send(EngineStatus::Help);
+                        }
+                        Some(EngineCommand::OpenSettings) => {
+                            paused = true;
+                            let _ = status_tx.send(EngineStatus::Settings);
+                        }
                     }
                 }
 
-                // ── VÉRIFICATION PÉRIODIQUE DU RÉSEAU ──
                 _ = health_tick.tick() => {
                     match provider.check_health().await {
                         Ok(HealthStatus::Ok { .. }) => {
@@ -368,14 +443,12 @@ impl SyncEngine {
                                 crate::notif::connection_restored(&self.cfg);
                                 let _ = status_tx.send(EngineStatus::Idle);
 
-                                // CORRECTION : On passe le local_root au flush
-                                if let Err(e) = offline::flush_queue(&db, &task_tx, &self.cfg.sync_pairs[0].local_path).await {
+                                if let Err(e) = offline::flush_queue(&db, &task_tx, &current_local_root).await {
                                     warn!("Erreur lors du flush de la file d'attente hors-ligne : {}", e);
                                 }
                             }
                         }
                         _ => {
-                            // On a perdu Internet
                             if !is_offline.swap(true, Ordering::Relaxed) {
                                 warn!("⚠️ Connexion perdue. Passage en mode SURVIE (Hors-Ligne).");
 
@@ -390,7 +463,10 @@ impl SyncEngine {
                     if !is_offline.load(Ordering::Relaxed) {
                         tracker.total_files.store(0, Ordering::Relaxed);
                         let _ = status_tx.send(EngineStatus::Syncing { active: 0 });
-                        let ignore_r = IgnoreMatcher::from_patterns(&self.cfg.ignore_patterns)?;
+
+                        let current_primary = self.cfg.get_primary_pair().context("Aucun dossier")?;
+                        let ignore_r = IgnoreMatcher::from_patterns(&current_primary.ignore_patterns)?;
+
                         tokio::select! {
                             r = scan::run(&self.cfg, &db, &ignore_r, &provider, &path_cache, &task_tx, &shutdown, &status_tx, &tracker) => {
                                 if let Err(e) = r {
@@ -416,12 +492,14 @@ impl SyncEngine {
                     let db2 = db.clone();
                     let provider2 = provider.clone();
                     let path_cache2 = path_cache.clone();
-                    let cfg2 = self.cfg.clone();
+                    let cfg2 = self.cfg.clone(); // Le worker reçoit la VRAIE config à jour
                     let sd2 = shutdown.clone();
                     let stx2 = status_tx.clone();
                     let active2 = active.clone();
                     let tracker2 = tracker.clone();
-                    let ignore_pat = self.cfg.ignore_patterns.clone();
+
+                    let current_primary = cfg2.get_primary_pair().context("Aucun dossier")?;
+                    let ignore_pat = current_primary.ignore_patterns.clone();
 
                     active2.fetch_add(1, Ordering::Relaxed);
 
@@ -511,14 +589,11 @@ fn spawn_debounced_dispatch(
                     for path in ready {
                         pending.remove(&path);
 
-                        // Si le réseau est coupé, on avale dans SQLite
                         if is_offline.load(Ordering::Relaxed) {
                             if let Ok(rel) = path.strip_prefix(&local_root) {
-                                // CORRECTION : push_offline_task
                                 let _ = db.push_offline_task("sync", &rel.to_string_lossy(), None);
                             }
                         } else {
-                            // Sinon on transmet aux workers
                             let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
                             tracker.total_files.fetch_add(1, Ordering::Relaxed);
                             tracker.total_bytes.fetch_add(size, Ordering::Relaxed);
@@ -540,11 +615,10 @@ fn spawn_debounced_dispatch(
                             pending.remove(&p);
                             if is_offline.load(Ordering::Relaxed) {
                                 if let Ok(rel) = p.strip_prefix(&local_root) {
-                                    // CORRECTION : push_offline_task
                                     let _ = db.push_offline_task("delete", &rel.to_string_lossy(), None);
                                 }
                             } else {
-                                tracker.total_files.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                tracker.total_files.fetch_add(1, Ordering::Relaxed);
                                 let task = Task::Delete(p);
                                 if task_tx.send(task).await.is_err() { return; }
                             }
@@ -554,11 +628,10 @@ fn spawn_debounced_dispatch(
                             pending.remove(&to);
                             if is_offline.load(Ordering::Relaxed) {
                                 if let (Ok(rel_from), Ok(rel_to)) = (from.strip_prefix(&local_root), to.strip_prefix(&local_root)) {
-                                    // CORRECTION : push_offline_task
                                     let _ = db.push_offline_task("rename", &rel_to.to_string_lossy(), Some(&rel_from.to_string_lossy()));
                                 }
                             } else {
-                                tracker.total_files.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                tracker.total_files.fetch_add(1, Ordering::Relaxed);
                                 let task = Task::Rename { from, to };
                                 if task_tx.send(task).await.is_err() { return; }
                             }
@@ -581,13 +654,14 @@ pub async fn run_unconfigured(
             maybe_cmd = cmd_rx.recv() => {
                 match maybe_cmd {
                     Some(EngineCommand::ApplyConfig(cfg)) => {
+                        let primary = cfg.get_primary_pair().context("Aucun dossier n'est configuré!")?;
                         match cfg.validate() {
                             Err(e) => {
                                 warn!(reason = %e, "config rejected: still invalid");
                                 let _ = status_tx.send(EngineStatus::Unconfigured(e.to_string()));
                             }
                             Ok(()) => {
-                                info!(local = %cfg.sync_pairs[0].local_path.display(), "valid config received, starting engine");
+                                info!(local = %primary.local_path.display(), "valid config received, starting engine");
                                 let engine = SyncEngine::new(cfg);
                                 return engine.run(db, shutdown, cmd_rx, status_tx).await;
                             }
@@ -608,7 +682,7 @@ pub async fn run_unconfigured(
 }
 
 pub(crate) async fn progress_publisher(
-    tracker: Arc<bandwidth::ProgressTracker>,
+    tracker: Arc<ProgressTracker>,
     status_tx: mpsc::UnboundedSender<EngineStatus>,
     shutdown: CancellationToken,
 ) {
@@ -660,7 +734,7 @@ mod tests {
         let (watch_tx, watch_rx) = mpsc::channel(10);
         let (task_tx, mut task_rx) = mpsc::channel(10);
         let shutdown = CancellationToken::new();
-        let tracker = Arc::new(crate::engine::bandwidth::ProgressTracker::new());
+        let tracker = Arc::new(ProgressTracker::new());
         let is_offline = Arc::new(AtomicBool::new(false));
 
         spawn_debounced_dispatch(
@@ -693,7 +767,7 @@ mod tests {
 
         let cfg = AppConfig::default();
         let configured_debounce = cfg.advanced.debounce_ms;
-        let tracker = Arc::new(crate::engine::bandwidth::ProgressTracker::new());
+        let tracker = Arc::new(ProgressTracker::new());
         let is_offline = Arc::new(AtomicBool::new(false));
 
         spawn_debounced_dispatch(
@@ -722,16 +796,16 @@ mod tests {
     async fn test_progress_publisher_throttle() {
         let (status_tx, mut status_rx) = mpsc::unbounded_channel();
         let shutdown = CancellationToken::new();
-        let tracker = Arc::new(crate::engine::bandwidth::ProgressTracker::new());
+        let tracker = Arc::new(ProgressTracker::new());
 
         tracker
             .total_files
-            .store(10, std::sync::atomic::Ordering::Relaxed);
+            .store(10, Ordering::Relaxed);
         tracker
             .done_files
-            .store(5, std::sync::atomic::Ordering::Relaxed);
+            .store(5, Ordering::Relaxed);
 
-        tokio::spawn(super::progress_publisher(
+        tokio::spawn(progress_publisher(
             tracker.clone(),
             status_tx,
             shutdown.clone(),
@@ -769,7 +843,7 @@ mod tests {
             .unwrap();
 
         // 2. Simuler le retour de la connexion : on appelle le flush avec un root local fictif
-        super::offline::flush_queue(&db, &task_tx, std::path::Path::new(""))
+        offline::flush_queue(&db, &task_tx, std::path::Path::new(""))
             .await
             .unwrap();
 

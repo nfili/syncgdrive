@@ -6,74 +6,117 @@ use libadwaita::prelude::*;
 #[derive(Clone)]
 pub struct ScanWindow {
     pub window: libadwaita::Window,
-    status_label: gtk4::Label,
+    phase_label: gtk4::Label,
     path_label: gtk4::Label,
     progress: gtk4::ProgressBar,
 }
 
 impl ScanWindow {
-    pub fn new(app: &gtk4::Application) -> Self {
+    pub fn new(app: &libadwaita::Application) -> Self {
         let window = libadwaita::Window::builder()
             .application(app)
-            .title("Synchronisation")
-            .default_width(420)
+            .title("Synchronisation SyncGDrive")
+            .default_width(540) // Fenêtre un peu plus large pour respirer
+            .default_height(380)
             .modal(true)
-            .deletable(false)
+            .deletable(false) // On empêche la fermeture par la croix
             .build();
 
-        let vbox = gtk4::Box::builder()
+        // ── En-tête natif GNOME/Libadwaita ──
+        let header_bar = libadwaita::HeaderBar::builder()
+            .show_start_title_buttons(false)
+            .show_end_title_buttons(false)
+            .build();
+
+        let main_vbox = gtk4::Box::builder()
             .orientation(gtk4::Orientation::Vertical)
-            .spacing(12)
-            .margin_top(24)
-            .margin_bottom(24)
+            .build();
+        main_vbox.append(&header_bar);
+
+        // ── Conteneur central (Clamp) pour un look Premium ──
+        let clamp = libadwaita::Clamp::builder()
+            .maximum_size(460) // Le contenu ne dépassera jamais cette largeur
+            .margin_top(32)
+            .margin_bottom(32)
             .margin_start(24)
             .margin_end(24)
             .build();
 
+        let content_box = gtk4::Box::builder()
+            .orientation(gtk4::Orientation::Vertical)
+            .spacing(24)
+            .build();
+
+        // 1. Animation de chargement géante
         let spinner = gtk4::Spinner::builder()
             .spinning(true)
             .halign(gtk4::Align::Center)
-            .width_request(32)
-            .height_request(32)
+            .width_request(64)
+            .height_request(64)
             .build();
 
-        let status_label = gtk4::Label::builder()
-            .label("Démarrage de l'analyse...")
-            .css_classes(["title-4"])
+        // 2. Grand titre de la phase en cours
+        let phase_label = gtk4::Label::builder()
+            .label("Initialisation du moteur...")
+            .css_classes(["title-2"]) // Grosse police claire et moderne
+            .halign(gtk4::Align::Center)
             .build();
 
-        let path_label = gtk4::Label::builder()
-            .ellipsize(gtk4::pango::EllipsizeMode::Middle)
-            .css_classes(["dim-label"])
+        // 3. Carte "Dashboard" stylisée pour la progression
+        let card_box = gtk4::Box::builder()
+            .orientation(gtk4::Orientation::Vertical)
+            .css_classes(["card"]) // Applique le fond blanc/gris arrondi de Libadwaita
+            .build();
+
+        let progress_vbox = gtk4::Box::builder()
+            .orientation(gtk4::Orientation::Vertical)
+            .spacing(12)
+            .margin_top(20)
+            .margin_bottom(20)
+            .margin_start(20)
+            .margin_end(20)
             .build();
 
         let progress = gtk4::ProgressBar::builder()
             .show_text(true)
+            .valign(gtk4::Align::Center)
             .build();
 
-        vbox.append(&spinner);
-        vbox.append(&status_label);
-        vbox.append(&progress);
-        vbox.append(&path_label);
+        let path_label = gtk4::Label::builder()
+            .ellipsize(gtk4::pango::EllipsizeMode::Middle)
+            .css_classes(["dim-label", "monospace"]) // Police technique et adoucie
+            .halign(gtk4::Align::Center)
+            .build();
 
-        window.set_content(Some(&vbox));
+        progress_vbox.append(&progress);
+        progress_vbox.append(&path_label);
+        card_box.append(&progress_vbox);
+
+        // ── Assemblage final ──
+        content_box.append(&spinner);
+        content_box.append(&phase_label);
+        content_box.append(&card_box);
+
+        clamp.set_child(Some(&content_box));
+        main_vbox.append(&clamp);
+
+        window.set_content(Some(&main_vbox));
 
         Self {
             window,
-            status_label,
+            phase_label,
             path_label,
             progress,
         }
     }
 
     pub fn update(&self, phase_name: &str, done: usize, total: usize, current: &str) {
-        self.status_label.set_label(phase_name);
+        self.phase_label.set_label(phase_name);
 
-        let (folders, file) = crate::utils::path_display::split_path_display(current);
-        let display_path = if folders.is_empty() {
-            file
+        let display_path = if current.is_empty() {
+            "Préparation...".to_string()
         } else {
-            format!("{}{}", folders, file)
+            current.to_string()
         };
         self.path_label.set_label(&display_path);
 
@@ -82,49 +125,45 @@ impl ScanWindow {
             self.progress.set_text(Some(&format!("{} / {}", done, total)));
         } else {
             self.progress.pulse();
-            self.progress.set_text(Some(&format!("{} éléments...", done)));
+            self.progress.set_text(Some(&format!("{} éléments analysés...", done)));
         }
     }
 }
 
-/// Lance la fenêtre de scan en mode autonome et écoute les mises à jour du moteur.
-pub fn run_standalone(rx: tokio::sync::watch::Receiver<crate::engine::EngineStatus>) {
-    let app = gtk4::Application::builder()
-        .application_id("fr.clyds.syncgdrive.scan")
-        .flags(gtk4::gio::ApplicationFlags::NON_UNIQUE)
-        .build();
+/// Affiche la fenêtre de scan et écoute les mises à jour du moteur.
+pub fn show_scan_window_in_app(
+    app: &libadwaita::Application,
+    mut rx: tokio::sync::watch::Receiver<crate::engine::EngineStatus>
+) {
+    // 1. On crée et on affiche la fenêtre immédiatement,
+    // l'application GTK est déjà en cours d'exécution !
+    let win = ScanWindow::new(app);
+    win.window.present();
 
-    app.connect_activate(move |app| {
-        let win = ScanWindow::new(app);
-        win.window.present();
+    let win_clone = win.clone();
 
-        let win_clone = win.clone();
-        let mut rx_clone = rx.clone();
-
-        gtk4::glib::MainContext::default().spawn_local(async move {
-            while rx_clone.changed().await.is_ok() {
-                let status = rx_clone.borrow().clone();
-                match status {
-                    crate::engine::EngineStatus::ScanProgress { phase, done, total, current } => {
-                        let phase_name = match phase {
-                            crate::engine::ScanPhase::RemoteListing => "Analyse Google Drive...",
-                            crate::engine::ScanPhase::LocalListing => "Analyse du disque local...",
-                            crate::engine::ScanPhase::Directories => "Création des dossiers...",
-                            crate::engine::ScanPhase::Comparing => "Comparaison des fichiers...",
-                        };
-                        win_clone.update(phase_name, done, total, &current);
-                    }
-                    crate::engine::EngineStatus::SyncProgress(_)
-                    | crate::engine::EngineStatus::Syncing { .. }
-                    | crate::engine::EngineStatus::Idle => {
-                        win_clone.window.close();
-                        break;
-                    }
-                    _ => {}
+    // 2. On lance l'écouteur asynchrone attaché à la boucle principale de GTK
+    gtk4::glib::MainContext::default().spawn_local(async move {
+        while rx.changed().await.is_ok() {
+            let status = rx.borrow().clone();
+            match status {
+                crate::engine::EngineStatus::ScanProgress { phase, done, total, current } => {
+                    let phase_name = match phase {
+                        crate::engine::ScanPhase::RemoteListing => "Analyse de Google Drive",
+                        crate::engine::ScanPhase::LocalListing => "Inventaire du disque local",
+                        crate::engine::ScanPhase::Directories => "Vérification des dossiers",
+                        crate::engine::ScanPhase::Comparing => "Comparaison des données",
+                    };
+                    win_clone.update(phase_name, done, total, &current);
                 }
+                crate::engine::EngineStatus::SyncProgress(_)
+                | crate::engine::EngineStatus::Syncing { .. }
+                | crate::engine::EngineStatus::Idle => {
+                    win_clone.window.close();
+                    break;
+                }
+                _ => {}
             }
-        });
+        }
     });
-
-    app.run_with_args::<String>(&[]);
 }

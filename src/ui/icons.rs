@@ -9,8 +9,28 @@ const ICON_IDLE: &[u8] = include_bytes!("../../assets/icons/idle.svg");
 const ICON_OFFLINE: &[u8] = include_bytes!("../../assets/icons/offline.svg");
 const ICON_ERROR: &[u8] = include_bytes!("../../assets/icons/error.svg");
 const ICON_PAUSED: &[u8] = include_bytes!("../../assets/icons/paused.svg");
-const ICON_SCAN: &[u8] = include_bytes!("../../assets/icons/scan.svg");
-const ICON_STARTING: &[u8] = include_bytes!("../../assets/icons/starting.svg");
+const ICON_SCAN_FRAMES: &[&[u8]] = &[
+    include_bytes!("../../assets/icons/scan_1.svg"),
+    include_bytes!("../../assets/icons/scan_2.svg"),
+    include_bytes!("../../assets/icons/scan_3.svg"),
+    include_bytes!("../../assets/icons/scan_4.svg"),
+    include_bytes!("../../assets/icons/scan_5.svg"),
+    include_bytes!("../../assets/icons/scan_6.svg"),
+    include_bytes!("../../assets/icons/scan_7.svg"),
+    include_bytes!("../../assets/icons/scan_8.svg"),
+];
+const ICON_STARTING_FRAMES: &[&[u8]] = &[
+    include_bytes!("../../assets/icons/starting_1.svg"),
+    include_bytes!("../../assets/icons/starting_2.svg"),
+    include_bytes!("../../assets/icons/starting_3.svg"),
+    include_bytes!("../../assets/icons/starting_4.svg"),
+    include_bytes!("../../assets/icons/starting_5.svg"),
+    include_bytes!("../../assets/icons/starting_6.svg"),
+    include_bytes!("../../assets/icons/starting_7.svg"),
+    include_bytes!("../../assets/icons/starting_8.svg"),
+];
+
+const ICON_SETTINGS: &[u8] = include_bytes!("../../assets/icons/settings.svg");
 
 // Frames d'animation (Dossier + Flèches vertes qui tournent)
 const ICON_SYNC_FRAMES: &[&[u8]] = &[
@@ -18,30 +38,53 @@ const ICON_SYNC_FRAMES: &[&[u8]] = &[
     include_bytes!("../../assets/icons/sync_2.svg"),
     include_bytes!("../../assets/icons/sync_3.svg"),
     include_bytes!("../../assets/icons/sync_4.svg"),
+    include_bytes!("../../assets/icons/sync_5.svg"),
+    include_bytes!("../../assets/icons/sync_6.svg"),
+    include_bytes!("../../assets/icons/sync_7.svg"),
+    include_bytes!("../../assets/icons/sync_8.svg"),
 ];
+
+const ICON_HELP: &[u8] = include_bytes!("../../assets/icons/help.svg");
 
 /// Les différents états visuels possibles de l'icône dans la barre des tâches.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum TrayIcon {
     Idle,
-    Starting,
-    Scanning,
+    Starting(u8),
+    Scanning(usize), // Contient l'index de la frame (0..3)
     Offline,
     Error,
     Paused,
     Sync(usize), // Contient l'index de la frame (0..3)
+    Settings,
+    Help,
 }
 
 /// Convertit une icône SVG en un buffer de pixels ARGB32 (format ksni/D-Bus).
 pub fn get_icon_pixmap(icon: TrayIcon) -> Vec<u8> {
     let svg_data = match icon {
         TrayIcon::Idle => ICON_IDLE,
-        TrayIcon::Starting => ICON_STARTING,
-        TrayIcon::Scanning => ICON_SCAN,
+        TrayIcon::Starting(percent) => {
+            // Mappage ultra-précis selon tes intervalles (0, 15, 30, 45, 60, 75, 90, 100)
+            let index = match percent {
+                0..=14  => 0, // Frame 1 : 0%
+                15..=29 => 1, // Frame 2 : 15%
+                30..=44 => 2, // Frame 3 : 30%
+                45..=59 => 3, // Frame 4 : 45%
+                60..=74 => 4, // Frame 5 : 60%
+                75..=89 => 5, // Frame 6 : 75%
+                90..=99 => 6, // Frame 7 : 90%
+                _       => 7, // Frame 8 : 100% (et sécurité au-delà)
+            };
+            ICON_STARTING_FRAMES[index]
+        },
+        TrayIcon::Scanning(frame) => ICON_SCAN_FRAMES[frame % ICON_SCAN_FRAMES.len()],
         TrayIcon::Offline => ICON_OFFLINE,
         TrayIcon::Error => ICON_ERROR,
         TrayIcon::Paused => ICON_PAUSED,
         TrayIcon::Sync(frame) => ICON_SYNC_FRAMES[frame % ICON_SYNC_FRAMES.len()],
+        TrayIcon::Settings => ICON_SETTINGS,
+        TrayIcon::Help => ICON_HELP,
     };
 
     render_svg_to_argb32(svg_data, 24, 24)

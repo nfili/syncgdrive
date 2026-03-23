@@ -45,6 +45,7 @@ impl GoogleAuth {
     }
 
     /// La fonction "Pro" pour le démarrage : Charge, Rafraîchit et Valide
+    /// La fonction "Pro" pour le démarrage : Charge, Rafraîchit, et Reconnecte si besoin
     pub async fn get_valid_token(&self) -> Result<String> {
         let tokens = self
             .storage
@@ -67,12 +68,40 @@ impl GoogleAuth {
             Some(TokenUrl::new("https://oauth2.googleapis.com/token".into())?),
         );
 
-        let token_response = client
+        // On sépare l'exécution de l'analyse du résultat
+        let token_result = client
             .exchange_refresh_token(&RefreshToken::new(tokens.refresh_token.clone()))
             .request_async(async_http_client)
-            .await
-            .context("Le rafraîchissement a échoué (accès peut-être révoqué)")?;
+            .await;
 
+        let token_response = match token_result {
+            Ok(res) => res,
+            Err(e) => {
+                tracing::warn!("⚠️ Le jeton de rafraîchissement a été rejeté (révoqué ou expiré) : {}", e);
+                tracing::info!("Suppression du jeton local corrompu...");
+
+                // 1. On nettoie le fichier chiffré qui ne fonctionne plus
+                let _ = self.storage.clear();
+
+                // 2. On avertit vocalement ou visuellement (Optionnel mais recommandé pour Bella)
+                #[cfg(target_os = "linux")]
+                let _ = std::process::Command::new("notify-send")
+                    .args(["-a", "SyncGDrive", "-i", "dialog-warning", "Reconnexion requise", "Votre session Google a expiré. Veuillez autoriser l'application dans votre navigateur."])
+                    .spawn();
+
+                tracing::info!("🌐 Ouverture du navigateur pour re-connexion...");
+
+                // 3. On force la nouvelle authentification !
+                let new_tokens = crate::auth::oauth2::authenticate(&self.creds).await
+                    .context("Échec de la nouvelle authentification via le navigateur")?;
+
+                // 4. On sauvegarde et on renvoie le nouveau jeton tout neuf
+                self.save_tokens(&new_tokens)?;
+                return Ok(new_tokens.access_token);
+            }
+        };
+
+        // Si le rafraîchissement standard a fonctionné :
         let new_tokens = GoogleTokens {
             access_token: token_response.access_token().secret().clone(),
             refresh_token: token_response
@@ -81,9 +110,9 @@ impl GoogleAuth {
                 .unwrap_or(tokens.refresh_token), // On garde l'ancien si pas de nouveau
             expires_at: chrono::Utc::now().timestamp()
                 + token_response
-                    .expires_in()
-                    .map(|d| d.as_secs())
-                    .unwrap_or(3599) as i64,
+                .expires_in()
+                .map(|d| d.as_secs())
+                .unwrap_or(3599) as i64,
             scope: tokens.scope.clone(),
         };
 

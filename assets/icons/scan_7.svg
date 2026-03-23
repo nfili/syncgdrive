@@ -15,8 +15,11 @@
               filter="url(#dropShadow)"
         />
     </g>
-    <g transform="scale(2) translate(-7.5, -6.8)" filter="URL(#dropShadow)">
-        <rect x="10" y="10" width="3" height="6" rx="1" fill="#F39C12" stroke="#FFFFFF" stroke-width="0.5"/>
-        <rect x="14" y="10" width="3" height="6" rx="1" fill="#F39C12" stroke="#FFFFFF" stroke-width="0.5"/>
+
+    <g transform="scale(1.15) translate(-0.3, -2.5) " filter="url(#dropShadow)">
+        <circle cx="13" cy="13" r="4"  stroke="#013286" fill="none" stroke-width="2"/>
+        <circle cx="13" cy="13" r="3" stroke="#FFFFFF" fill="#FFFFFF" stroke-width="0.5" opacity="0.4"/>
+        <ellipse cx="11.8" cy="11.8" rx="2" ry="1.2" fill="#FFFFFF" opacity="0.6" transform="rotate(135,11.8,11.8)"/>
+        <path d="M16.2 16.2l3 3" stroke="#013286" stroke-width="2" stroke-linecap="round"/>
     </g>
 </svg>

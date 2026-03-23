@@ -68,7 +68,8 @@ async fn sync_file(
         return Ok(());
     }
 
-    let rel = rel_str(&cfg.sync_pairs[0].local_path, path)?;
+    let primary = cfg.get_primary_pair().context("Aucun dossier")?;
+    let rel = rel_str(&primary.local_path, path)?;
     let mtime = mtime(path)?;
 
     // Check rapide MTime
@@ -104,12 +105,12 @@ async fn sync_file(
     let file_name = path.file_name().unwrap().to_string_lossy().to_string();
     let parent_rel = path
         .parent()
-        .and_then(|p| p.strip_prefix(&cfg.sync_pairs[0].local_path).ok())
+        .and_then(|p| p.strip_prefix(&primary.local_path).ok())
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_default();
 
     let parent_id = if parent_rel.is_empty() {
-        cfg.sync_pairs[0].remote_folder_id.clone()
+        primary.remote_folder_id.clone()
     } else {
         path_cache
             .lookup(&parent_rel)
@@ -216,7 +217,8 @@ async fn delete(
         return Ok(());
     }
 
-    let rel = match rel_str(&cfg.sync_pairs[0].local_path, path) {
+    let primary = cfg.get_primary_pair().context("Aucun dossier")?;
+    let rel = match rel_str(&primary.local_path, path) {
         Ok(r) => r,
         Err(_) => return Ok(()),
     };
@@ -252,8 +254,9 @@ async fn rename(
         return Ok(());
     }
 
-    let from_rel = rel_str(&cfg.sync_pairs[0].local_path, from).unwrap_or_default();
-    let to_rel = rel_str(&cfg.sync_pairs[0].local_path, to).unwrap_or_default();
+    let primary = cfg.get_primary_pair().context("Aucun dossier")?;
+    let from_rel = rel_str(&primary.local_path, from).unwrap_or_default();
+    let to_rel = rel_str(&primary.local_path, to).unwrap_or_default();
 
     let from_entry = path_cache.lookup(&from_rel).await;
     let from_in_db = !from_rel.is_empty() && db.get(&from_rel)?.is_some();
@@ -270,12 +273,12 @@ async fn rename(
 
     let new_parent_rel = to
         .parent()
-        .and_then(|p| p.strip_prefix(&cfg.sync_pairs[0].local_path).ok())
+        .and_then(|p| p.strip_prefix(&primary.local_path).ok())
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_default();
 
     let new_parent_id = if new_parent_rel.is_empty() {
-        cfg.sync_pairs[0].remote_folder_id.clone()
+        primary.remote_folder_id.clone()
     } else {
         path_cache
             .lookup(&new_parent_rel)

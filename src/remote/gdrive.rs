@@ -50,7 +50,7 @@ impl GDriveProvider {
             .context("Erreur d'initialisation du client HTTP reqwest")?;
 
         let limiter = Arc::new(BandwidthLimiter::new(config.upload_limit_kbps));
-        // On récupère la limite RPS depuis la configuration (par défaut 10 requêtes / seconde)
+        // On récupère la limite RPS depuis la configuration (par défaut 10 requêtes / seconde).
         let api_limiter = Arc::new(ApiRateLimiter::new(config.api_rate_limit_rps));
 
         Ok(Self {
@@ -214,7 +214,7 @@ impl GDriveProvider {
 
         let init_res = init_request
             .bearer_auth(&token)
-            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .header(header::CONTENT_TYPE, "application/json")
             .query(&[("fields", "id,md5Checksum,size")])
             .json(&meta_json)
             .send()
@@ -233,7 +233,7 @@ impl GDriveProvider {
 
         let session_uri = init_res
             .headers()
-            .get(reqwest::header::LOCATION)
+            .get(header::LOCATION)
             .context("L'API Google n'a pas renvoyé l'en-tête Location")?
             .to_str()?
             .to_string();
@@ -272,7 +272,7 @@ impl GDriveProvider {
         let put_future = self
             .client
             .put(&session_uri)
-            .header(reqwest::header::CONTENT_LENGTH, file_size)
+            .header(header::CONTENT_LENGTH, file_size)
             .body(body)
             .send();
 
@@ -314,55 +314,6 @@ impl GDriveProvider {
 
 #[async_trait]
 impl RemoteProvider for GDriveProvider {
-    async fn check_health(&self) -> Result<HealthStatus> {
-        self.api_limiter.acquire().await; // Péage API
-        let token = self.get_token().await?;
-
-        let res = self
-            .client
-            .get(format!("{}/about", self.config.api_base))
-            .query(&[("fields", "user,storageQuota")])
-            .bearer_auth(&token)
-            .send()
-            .await?;
-
-        if res.status() == 429 {
-            let wait = Self::parse_retry_after(res.headers());
-            self.api_limiter.handle_rate_limit(wait).await;
-            return Ok(HealthStatus::Unreachable);
-        }
-
-        if res.status().is_client_error() {
-            if res.status().as_u16() == 401 {
-                return Ok(HealthStatus::AuthExpired);
-            }
-            return Ok(HealthStatus::Unreachable);
-        }
-
-        let data: serde_json::Value = res.json().await?;
-
-        let email = data["user"]["emailAddress"]
-            .as_str()
-            .unwrap_or("Inconnu")
-            .to_string();
-        let quota_used = data["storageQuota"]["usage"]
-            .as_str()
-            .unwrap_or("0")
-            .parse()
-            .unwrap_or(0);
-        let quota_total = data["storageQuota"]["limit"]
-            .as_str()
-            .unwrap_or("0")
-            .parse()
-            .unwrap_or(0);
-
-        Ok(HealthStatus::Ok {
-            email,
-            quota_used,
-            quota_total,
-        })
-    }
-
     async fn list_remote(&self, root_id: &str) -> Result<RemoteIndex> {
         let mut files = Vec::new();
         let mut dirs = Vec::new();
@@ -371,6 +322,7 @@ impl RemoteProvider for GDriveProvider {
         queue.push_back((root_id.to_string(), String::new()));
 
         while let Some((current_folder_id, current_path)) = queue.pop_front() {
+            tokio::task::yield_now().await;
             let mut page_token: Option<String> = None;
 
             loop {
@@ -781,6 +733,55 @@ impl RemoteProvider for GDriveProvider {
             changes,
             new_cursor,
             has_more,
+        })
+    }
+
+    async fn check_health(&self) -> Result<HealthStatus> {
+        self.api_limiter.acquire().await; // Péage API
+        let token = self.get_token().await?;
+
+        let res = self
+            .client
+            .get(format!("{}/about", self.config.api_base))
+            .query(&[("fields", "user,storageQuota")])
+            .bearer_auth(&token)
+            .send()
+            .await?;
+
+        if res.status() == 429 {
+            let wait = Self::parse_retry_after(res.headers());
+            self.api_limiter.handle_rate_limit(wait).await;
+            return Ok(HealthStatus::Unreachable);
+        }
+
+        if res.status().is_client_error() {
+            if res.status().as_u16() == 401 {
+                return Ok(HealthStatus::AuthExpired);
+            }
+            return Ok(HealthStatus::Unreachable);
+        }
+
+        let data: serde_json::Value = res.json().await?;
+
+        let email = data["user"]["emailAddress"]
+            .as_str()
+            .unwrap_or("Inconnu")
+            .to_string();
+        let quota_used = data["storageQuota"]["usage"]
+            .as_str()
+            .unwrap_or("0")
+            .parse()
+            .unwrap_or(0);
+        let quota_total = data["storageQuota"]["limit"]
+            .as_str()
+            .unwrap_or("0")
+            .parse()
+            .unwrap_or(0);
+
+        Ok(HealthStatus::Ok {
+            email,
+            quota_used,
+            quota_total,
         })
     }
 
