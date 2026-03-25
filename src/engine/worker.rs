@@ -25,7 +25,23 @@ pub(crate) async fn handle(
     ignore: &IgnoreMatcher,
     tracker: Arc<ProgressTracker>,
     shutdown: &CancellationToken,
+    dry_run: bool,
 ) -> Result<()> {
+    if dry_run {
+        match &task {
+            Task::SyncFile { path } => {
+                let size = tokio::fs::metadata(path).await.map(|m| m.len()).unwrap_or(0);
+                tracing::info!("[DRY-RUN] upload: {} ({} octets)", path.display(), size);
+            }
+            Task::Delete(path) => {
+                tracing::info!("[DRY-RUN] delete: {}", path.display());
+            }
+            Task::Rename { from, to } => {
+                tracing::info!("[DRY-RUN] rename: {} → {}", from.display(), to.display());
+            }
+        }
+        return Ok(());
+    }
     match task {
         Task::SyncFile { path } => {
             sync_file(
@@ -453,7 +469,7 @@ mod tests {
         let task = Task::SyncFile {
             path: file_path.clone(),
         };
-        handle(task, &cfg, &db, &provider, &cache, &ignore, tracker, &sd)
+        handle(task, &cfg, &db, &provider, &cache, &ignore, tracker, &sd,false)
             .await
             .unwrap();
 
@@ -480,6 +496,7 @@ mod tests {
             &ignore,
             tracker.clone(),
             &sd,
+            false
         )
         .await
         .unwrap();
@@ -488,7 +505,7 @@ mod tests {
         let task2 = Task::SyncFile {
             path: file_path.clone(),
         };
-        handle(task2, &cfg, &db, &provider, &cache, &ignore, tracker, &sd)
+        handle(task2, &cfg, &db, &provider, &cache, &ignore, tracker, &sd,false)
             .await
             .unwrap();
         assert_eq!(mock.uploads.load(Ordering::Relaxed), 1);

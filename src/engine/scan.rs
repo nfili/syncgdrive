@@ -27,6 +27,7 @@ pub(crate) async fn run(
     shutdown: &CancellationToken,
     status_tx: &mpsc::UnboundedSender<EngineStatus>,
     tracker: &Arc<ProgressTracker>,
+    dry_run: bool,
 ) -> Result<()> {
     let primary = cfg.get_primary_pair().context("Aucun dossier")?;
     info!(root = %primary.local_path.display(), "scan: start");
@@ -88,7 +89,6 @@ pub(crate) async fn run(
         .filter_entry(|e| !ignore.is_ignored(e.path()))
         .filter_map(|e| e.ok())
     {
-        // 🌟 RESPIRATION POUR TOKIO : Rend l'interface instantanément réactive
         tokio::task::yield_now().await;
 
         if shutdown.is_cancelled() {
@@ -157,7 +157,6 @@ pub(crate) async fn run(
             continue;
         }
 
-        // Crée chaque composant manquant
         let mut current_rel = String::new();
         let mut current_parent = primary.remote_folder_id.clone();
 
@@ -171,17 +170,22 @@ pub(crate) async fn run(
             if let Some(entry) = path_cache.lookup(&current_rel).await {
                 current_parent = entry.drive_id.clone();
             } else {
-                let p = Arc::clone(provider);
-                let cur_parent_clone = current_parent.clone();
-                let part_clone = part.clone();
+                let new_id = if dry_run {
+                    info!("[DRY-RUN] mkdir: {}", current_rel);
+                    format!("dry_run_dir_{}", current_rel.replace('/', "_"))
+                } else {
+                    let p = Arc::clone(provider);
+                    let cur_parent_clone = current_parent.clone();
+                    let part_clone = part.clone();
 
-                let new_id = retry(cfg, shutdown, "mkdir", || {
-                    let p_inner = Arc::clone(&p);
-                    let parent = cur_parent_clone.clone();
-                    let pt = part_clone.clone();
-                    async move { p_inner.mkdir(&parent, &pt).await }
-                })
-                .await?;
+                    retry(cfg, shutdown, "mkdir", || {
+                        let p_inner = Arc::clone(&p);
+                        let parent = cur_parent_clone.clone();
+                        let pt = part_clone.clone();
+                        async move { p_inner.mkdir(&parent, &pt).await }
+                    })
+                        .await?
+                };
 
                 path_cache
                     .insert(&current_rel, &new_id, &current_parent)
@@ -199,6 +203,9 @@ pub(crate) async fn run(
         elapsed_ms = t2.elapsed().as_millis(),
         "scan: dossiers OK"
     );
+
+    let mut orphans_db = 0;
+    let mut orphans_remote = 0;
 
     // ── Phase 3 : comparaison fichiers local ↔ DB ─────────────────────────────
     let _ = status_tx.send(EngineStatus::ScanProgress {
@@ -218,7 +225,6 @@ pub(crate) async fn run(
     let mut skipped_remote = 0usize;
 
     for (i, file_path) in local_files.iter().enumerate() {
-        // 🌟 RESPIRATION POUR TOKIO : Rend l'interface instantanément réactive
         tokio::task::yield_now().await;
 
         if shutdown.is_cancelled() {
@@ -244,14 +250,11 @@ pub(crate) async fn run(
             });
         }
 
-        // NOUVEAU : On vérifie d'abord si le fichier existe vraiment sur Google Drive !
         let remote_exists = path_cache.lookup(&rel).await.is_some();
 
         if db_index.contains(&rel) && remote_exists {
-            // <-- SÉCURITÉ ICI
             if let Ok(Some(entry)) = db.get(&rel) {
                 let mtime = mtime_of(file_path);
-                // On passe SEULEMENT si la date est bonne ET qu'il est sur le Drive
                 if mtime == entry.mtime {
                     skipped += 1;
                     continue;
@@ -269,7 +272,6 @@ pub(crate) async fn run(
                 }
             }
         } else if remote_exists {
-            // Il est sur le Drive, mais pas dans notre DB (ou on l'a oublié).
             if let Ok(hash) = hash_of(file_path).await {
                 let mtime = mtime_of(file_path);
                 let _ = db.upsert(&FileEntry {
@@ -282,7 +284,6 @@ pub(crate) async fn run(
             continue;
         }
 
-        // Si on arrive ici, le fichier DOIT être synchronisé (ajouté ou modifié)
         to_sync.push(file_path.clone());
     }
 
@@ -294,17 +295,18 @@ pub(crate) async fn run(
     );
     notif::scan_complete(cfg, total_dirs, to_sync.len(), skipped + skipped_remote);
 
-    // NOUVEAU : Calcul du poids total AVANT l'envoi en queue
     let total_to_sync_bytes: u64 = to_sync
         .iter()
         .map(|p| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0))
         .sum();
 
-    // On initialise le tracker avec les vraies valeurs finales
-    tracker.total_files.store(to_sync.len(), Ordering::Relaxed);
-    tracker
-        .total_bytes
-        .store(total_to_sync_bytes, Ordering::Relaxed);
+    if !dry_run{
+        tracker.total_files.store(to_sync.len(), Ordering::Relaxed);
+        tracker
+            .total_bytes
+            .store(total_to_sync_bytes, Ordering::Relaxed);
+    }
+
 
     // ── Phase 4 : enqueue les fichiers à synchroniser ─────────────────────────
     let sync_total = to_sync.len();
@@ -320,7 +322,7 @@ pub(crate) async fn run(
         let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
 
         let _ = status_tx.send(EngineStatus::ScanProgress {
-            phase: ScanPhase::Comparing, // Indique qu'on est en train de comparer/préparer
+            phase: ScanPhase::Comparing,
             done: i + 1,
             total: sync_total,
             current: file_name.clone(),
@@ -330,7 +332,10 @@ pub(crate) async fn run(
             notif::sync_progress(cfg, i + 1, sync_total, &file_name, size);
         }
 
-        if task_tx.send(Task::SyncFile { path }).await.is_err() {
+        // 🌟 SÉCURITÉ DRY-RUN : On bloque l'envoi au canal
+        if dry_run {
+            info!("[DRY-RUN] 📤 À uploader : {}", path.display());
+        } else if task_tx.send(Task::SyncFile { path }).await.is_err() {
             anyhow::bail!("shutdown: task queue closed");
         }
     }
@@ -347,15 +352,19 @@ pub(crate) async fn run(
 
     // ── Phase 5 : suppression des orphelins DB ──────────────────────────────
     {
-        let mut orphans_db = 0usize;
         for db_path in &db_index {
             if shutdown.is_cancelled() {
                 anyhow::bail!("shutdown: scan interrupted");
             }
             if !local_rel_set.contains(db_path) {
                 let full_local = primary.local_path.join(db_path);
-                tracker.total_files.fetch_add(1, Ordering::Relaxed);
-                if task_tx.send(Task::Delete(full_local)).await.is_err() {
+                if !dry_run {
+                    tracker.total_files.fetch_add(1, Ordering::Relaxed);
+                }
+                // 🌟 SÉCURITÉ DRY-RUN : On bloque l'envoi au canal
+                if dry_run {
+                    info!("[DRY-RUN] 🗑️ À supprimer (Local DB) : {}", full_local.display());
+                } else if task_tx.send(Task::Delete(full_local)).await.is_err() {
                     anyhow::bail!("shutdown: task queue closed");
                 }
                 orphans_db += 1;
@@ -371,8 +380,6 @@ pub(crate) async fn run(
 
     // ── Phase 6 : suppression des orphelins remote ──────────────────────────
     {
-        let mut orphans_remote = 0usize;
-
         for remote_file in &remote_index.files {
             if shutdown.is_cancelled() {
                 anyhow::bail!("shutdown: scan interrupted");
@@ -394,8 +401,14 @@ pub(crate) async fn run(
                 continue;
             }
 
-            tracker.total_files.fetch_add(1, Ordering::Relaxed);
-            if task_tx.send(Task::Delete(local_path)).await.is_err() {
+            if !dry_run {
+                tracker.total_files.fetch_add(1, Ordering::Relaxed);
+            }
+
+            // 🌟 SÉCURITÉ DRY-RUN : On bloque l'envoi au canal
+            if dry_run {
+               info!("[DRY-RUN] 🗑️ À supprimer (Remote) : {}", local_path.display());
+            } else if task_tx.send(Task::Delete(local_path)).await.is_err() {
                 anyhow::bail!("shutdown: task queue closed");
             }
             orphans_remote += 1;
@@ -408,9 +421,21 @@ pub(crate) async fn run(
         }
     }
 
+    // ── Résumé final (Garanti d'apparaître en tout dernier) ─────────────────
+    if dry_run {
+        let total_ops = sync_total + dirs_created + orphans_db + orphans_remote;
+        tracing::warn!("=== DRY-RUN SUMMARY ===");
+        tracing::warn!("Files to upload:  {} ({} octets)", sync_total, total_to_sync_bytes);
+        tracing::warn!("Dirs to create:   {}", dirs_created);
+        tracing::warn!("Files to delete:  {}", orphans_db + orphans_remote);
+        tracing::warn!("Total operations: {}", total_ops);
+        tracing::warn!("=======================");
+
+        let _ = status_tx.send(EngineStatus::Idle);
+    }
+
     Ok(())
 }
-
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 fn mtime_of(path: &Path) -> i64 {

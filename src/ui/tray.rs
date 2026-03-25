@@ -34,6 +34,7 @@ pub fn spawn_tray(
     shutdown: CancellationToken,
     log_dir: PathBuf,
     ui_tx: tokio::sync::mpsc::UnboundedSender<crate::ui::UiCommand>,
+    dry_run: bool,
 ) -> Result<()> {
     let sd = shutdown.clone();
     let autostart = is_autostart_enabled();
@@ -52,6 +53,7 @@ pub fn spawn_tray(
         animation_frame: 0,
         is_animating: false,
         ui_tx: ui_tx.clone(),
+        dry_run,
     };
 
     // CORRECTION : On clone l'accès au statut pour notre boucle d'animation
@@ -148,6 +150,7 @@ struct SyncTray {
     animation_frame: usize,
     is_animating: bool,
     pub ui_tx: tokio::sync::mpsc::UnboundedSender<crate::ui::UiCommand>,
+    pub dry_run: bool,
 }
 
 impl ksni::Tray for SyncTray {
@@ -196,7 +199,7 @@ impl ksni::Tray for SyncTray {
     }
 
     fn title(&self) -> String {
-        match &*self.status.lock().unwrap() {
+        let base_title = match &*self.status.lock().unwrap() {
             EngineStatus::Starting(p) => format!("SyncGDrive — Démarrage ({}%)…", p),
             EngineStatus::Unconfigured(_) => "SyncGDrive — Configuration requise".into(),
             EngineStatus::Idle => "SyncGDrive — Surveillance active".into(),
@@ -217,29 +220,29 @@ impl ksni::Tray for SyncTray {
                     format!("SyncGDrive — {label}…")
                 }
             }
-            EngineStatus::SyncProgress(snap) => format!(
-                "SyncGDrive — ↑ {}/{} {}",
-                snap.done_files, snap.total_files, snap.current_name
-            ),
+            EngineStatus::SyncProgress(snap) =>{
+                let current_idx = (snap.done_files + 1).min(snap.total_files);
+                format!("SyncGDrive — ↑ {}/{}",current_idx, snap.total_files)
+            }
             EngineStatus::Syncing { active } => format!("SyncGDrive — {active} transfert(s)"),
             EngineStatus::Paused => "SyncGDrive — ⏸ En pause".into(),
             EngineStatus::Error(_) => "SyncGDrive — Erreur".into(),
             EngineStatus::Stopped => "SyncGDrive — Arrêté".into(),
             EngineStatus::Settings => "SyncGDrive — Paramètres".into(),
             EngineStatus::Help => "SincGDrive — Aide & Configuration".into(),
+        };
+        if self.dry_run {
+            format!("{} 🛡️ (SIMULATION)", base_title)
+        } else {
+            base_title
         }
     }
 
     fn tool_tip(&self) -> ksni::ToolTip {
-        let (title, description) = match &*self.status.lock().unwrap() {
-            EngineStatus::Starting(p) => (
-                "SyncGDrive — Démarrage".into(),
-                format!("Initialisation en cours ({}%)…", p),
-            ),
-            EngineStatus::Unconfigured(reason) => (
-                "SyncGDrive — Configuration requise".into(),
-                format!("Ouvrez les Réglages pour configurer.\n{reason}"),
-            ),
+        let title = self.title();
+        let description = match &*self.status.lock().unwrap() {
+            EngineStatus::Starting(p) => format!("Initialisation en cours ({}%)…", p),
+            EngineStatus::Unconfigured(reason) => format!("Ouvrez les Réglages pour configurer.\n{reason}"),
             EngineStatus::Idle => {
                 let cfg = self.config.lock().unwrap();
                 let last = if self.last_synced.is_empty() {
@@ -257,13 +260,8 @@ impl ksni::Tray for SyncTray {
                     .first()
                     .map(|p| p.remote_folder_id.clone())
                     .unwrap_or_else(|| "Aucun".into());
-                (
-                    "SyncGDrive — Surveillance active".into(),
-                    format!(
-                        "Surveillance active — Dossier à jour.\n{} → {}{}",
-                        local_disp, remote_disp, last
-                    ),
-                )
+                format!("Surveillance active — Dossier à jour.\n{} → {}{}",
+                        local_disp, remote_disp, last)
             }
             EngineStatus::ScanProgress {
                 phase,
@@ -273,20 +271,14 @@ impl ksni::Tray for SyncTray {
             } => {
                 let (_, clean_name) = crate::utils::path_display::split_path_display(current);
                 match phase {
-                    ScanPhase::RemoteListing => (
-                        "SyncGDrive — Analyse Drive".into(),
-                        format!("Analyse Google Drive en cours…\n(Lecture de : {clean_name})"),
-                    ),
+                    ScanPhase::RemoteListing =>format!("Analyse Google Drive en cours…\n(Lecture de : {clean_name})"),
                     ScanPhase::LocalListing => {
                         let detail = if *done > 0 {
                             format!("({done} éléments indexés)")
                         } else {
                             format!("({clean_name})")
                         };
-                        (
-                            "SyncGDrive — Analyse locale".into(),
-                            format!("Analyse du disque local…\n{detail}"),
-                        )
+                        format!("Analyse du disque local…\n{detail}")
                     }
                     ScanPhase::Directories => {
                         let pct = if *total > 0 {
@@ -295,7 +287,7 @@ impl ksni::Tray for SyncTray {
                             0.0
                         };
                         let bar = progress_bar(pct, 10);
-                        ("SyncGDrive — Création dossiers".into(), format!("Création de l'arborescence : {pct:.0}% {bar}\nDossier : {clean_name}\n({done} sur {total} créés)"))
+                        format!("Création de l'arborescence : {pct:.0}% {bar}\nDossier : {clean_name}\n({done} sur {total} créés)")
                     }
                     ScanPhase::Comparing => {
                         let pct = if *total > 0 {
@@ -304,7 +296,7 @@ impl ksni::Tray for SyncTray {
                             0.0
                         };
                         let bar = progress_bar(pct, 10);
-                        ("SyncGDrive — Comparaison".into(), format!("Comparaison avec la base de données… {pct:.0}% {bar}\n({done}/{total} fichiers analysés)"))
+                        format!("Comparaison avec la base de données… {pct:.0}% {bar}\n({done}/{total} fichiers analysés)")
                     }
                 }
             }
@@ -325,10 +317,10 @@ impl ksni::Tray for SyncTray {
                 let formatted_path =
                     crate::utils::path_display::format_path_tooltip(&full_rel_path);
 
-                let current_idx = (snap.done_files + 1).min(snap.total_files);
+                // let current_idx = (snap.done_files + 1).min(snap.total_files);
 
-                (
-                    format!("Transfert {}/{}", current_idx, snap.total_files),
+                // (
+                //     format!("Transfert {}/{}", current_idx, snap.total_files),
                     format!(
                         "{}\n{} {:.0}% · {}/s · {}\nTotal : {} / {}",
                         formatted_path,
@@ -338,31 +330,17 @@ impl ksni::Tray for SyncTray {
                         snap.eta_string,
                         human_size(snap.sent_bytes),
                         human_size(snap.total_bytes)
-                    ),
-                )
+                    )
+                // )
             }
-            EngineStatus::Syncing { active } => (
-                format!("SyncGDrive — {active} transfert(s) en cours"),
-                "Transferts vers Google Drive…".into(),
-            ),
-            EngineStatus::Paused => (
-                "SyncGDrive — ⏸ En pause".into(),
-                "Moteur suspendu.\n(Ouvrez le menu contextuel pour reprendre)".into(),
-            ),
-            EngineStatus::Error(e) => (
-                "SyncGDrive — Erreur".into(),
-                format!("{e}\nVérifiez les logs ou les tokens KIO."),
-            ),
-            EngineStatus::Stopped => ("SyncGDrive — Arrêté".into(), "Le moteur est arrêté.".into()),
-            EngineStatus::Settings => (
-                "SyncGDrive — Paramètres".into(),
-                "Synchronisation en pause pendant la configuration.".into(), // <-- Explication claire
-            ),
-            EngineStatus::Help => (
-                "SyncGDrive — Aide & Configuration".into(),
-                "Synchronisatin en pause pendant l'affichage de la fenêtre.".into(),
-            ),
+            EngineStatus::Syncing { .. } => "Transferts vers Google Drive…".into(),
+            EngineStatus::Paused => "Moteur suspendu.\n(Ouvrez le menu contextuel pour reprendre)".into(),
+            EngineStatus::Error(e) => format!("{e}\nVérifiez les logs ou les tokens KIO."),
+            EngineStatus::Stopped => "Le moteur est arrêté.".into(),
+            EngineStatus::Settings => "Synchronisation en pause pendant la configuration.".into(), // <-- Explication claire
+            EngineStatus::Help => "Synchronisatin en pause pendant l'affichage de la fenêtre.".into(),
         };
+
         ksni::ToolTip {
             title,
             description,

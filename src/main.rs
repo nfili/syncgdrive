@@ -15,12 +15,20 @@ async fn main() -> Result<()> {
     let env_path = sync_g_drive::config::config_dir().join(".env");
     let _ = dotenvy::from_path(&env_path); // On ignore l'erreur si le fichier n'existe pas encore
 
+    let dry_run = std::env::var("SYNCGDRIVE_DRY_RUN")
+        .map(|v| v == "1" || v.to_lowercase() == "true")
+        .unwrap_or(false);
+
     // ── Instance unique (File Lock POSIX) ─────────────────────────────────
     let _lock = acquire_instance_lock();
 
     // ── Initialisation des Logs (doit se faire très tôt) ──────────────────
     let log_dir = log_dir();
     let _log_guard = init_logging(&log_dir)?;
+
+    if dry_run {
+        warn!("🛡️ MODE DRY-RUN ACTIVÉ : Simulation uniquement, aucune modification ne sera appliquée.");
+    }
 
     // ── Auto-détection de la session ──────────────────
     let auth = sync_g_drive::auth::GoogleAuth::new();
@@ -100,7 +108,7 @@ async fn main() -> Result<()> {
         ))
     } else {
         // Le SyncEngine prend maintenant la config complète
-        tokio::spawn(SyncEngine::new(Arc::from(cfg.clone())).run(
+        tokio::spawn(SyncEngine::new(Arc::from(cfg.clone()),dry_run).run(
             db,
             shutdown.clone(),
             cmd_rx,
@@ -120,6 +128,7 @@ async fn main() -> Result<()> {
             shutdown.clone(),
             log_dir,
             ui_tx,
+            dry_run,
         )?;
     }
     #[cfg(not(feature = "ui"))]

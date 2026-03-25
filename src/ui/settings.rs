@@ -29,6 +29,7 @@ pub fn show_settings_in_app(
     let win = open(app, config, move |new_cfg| {
         is_saved_clone.set(true); // On note qu'on a cliqué sur Enregistrer
         let _ = cmd_tx.try_send(EngineCommand::ApplyConfig(Arc::new(new_cfg)));
+        let _ = cmd_tx.try_send(EngineCommand::Resume);
     })
     .expect("Erreur création fenêtre réglages");
 

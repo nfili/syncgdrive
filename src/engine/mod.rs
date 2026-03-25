@@ -74,6 +74,7 @@ pub(crate) enum Task {
 // ── SyncEngine ────────────────────────────────────────────────────────────────
 
 pub struct SyncEngine {
+    pub dry_run: bool,
     cfg: Arc<AppConfig>,
 }
 
@@ -119,8 +120,8 @@ macro_rules! await_scan_interruptible {
 }
 
 impl SyncEngine {
-    pub fn new(cfg: Arc<AppConfig>) -> Self {
-        Self { cfg }
+    pub fn new(cfg: Arc<AppConfig>, dry_run: bool) -> Self {
+        Self { dry_run,cfg }
     }
 
     pub async fn run(
@@ -193,6 +194,7 @@ impl SyncEngine {
                 &shutdown,
                 &status_tx,
                 &tracker,
+                self.dry_run,
             );
             tokio::pin!(scan);
 
@@ -325,7 +327,7 @@ impl SyncEngine {
                                     let ig = IgnoreMatcher::from_patterns(&current_primary.ignore_patterns)?;
 
                                     await_scan_interruptible!(
-                                        scan::run(&self.cfg, &db, &ig, &provider, &path_cache, &task_tx, &shutdown, &status_tx, &tracker),
+                                        scan::run(&self.cfg, &db, &ig, &provider, &path_cache, &task_tx, &shutdown, &status_tx, &tracker,self.dry_run),
                                         shutdown, cmd_rx, status_tx, tracker, paused, rescan_on_resume
                                     );
                                 }
@@ -394,7 +396,7 @@ impl SyncEngine {
                                 let ignore2 = IgnoreMatcher::from_patterns(&current_primary.ignore_patterns)?;
 
                                 await_scan_interruptible!(
-                                    scan::run(&self.cfg, &db, &ignore2, &provider, &path_cache, &task_tx, &shutdown, &status_tx, &tracker),
+                                    scan::run(&self.cfg, &db, &ignore2, &provider, &path_cache, &task_tx, &shutdown, &status_tx, &tracker, self.dry_run),
                                     shutdown, cmd_rx, status_tx, tracker, paused, rescan_on_resume
                                 );
                             }
@@ -423,7 +425,7 @@ impl SyncEngine {
                                     tracker.total_files.store(0, Ordering::Relaxed);
                                     let _ = status_tx.send(EngineStatus::Syncing { active: 0 });
                                     await_scan_interruptible!(
-                                        scan::run(&self.cfg, &db, &ignore3, &provider, &path_cache, &task_tx, &shutdown, &status_tx, &tracker),
+                                        scan::run(&self.cfg, &db, &ignore3, &provider, &path_cache, &task_tx, &shutdown, &status_tx, &tracker,self.dry_run),
                                         shutdown, cmd_rx, status_tx, tracker, paused, rescan_on_resume
                                     );
                                 }
@@ -474,7 +476,7 @@ impl SyncEngine {
                         let ignore_r = IgnoreMatcher::from_patterns(&current_primary.ignore_patterns)?;
 
                         tokio::select! {
-                            r = scan::run(&self.cfg, &db, &ignore_r, &provider, &path_cache, &task_tx, &shutdown, &status_tx, &tracker) => {
+                            r = scan::run(&self.cfg, &db, &ignore_r, &provider, &path_cache, &task_tx, &shutdown, &status_tx, &tracker, self.dry_run) => {
                                 if let Err(e) = r {
                                     if is_shutdown_err(&e) { shutdown.cancel(); break; }
                                     let _ = status_tx.send(EngineStatus::Error(e.to_string()));
@@ -520,7 +522,7 @@ impl SyncEngine {
 
                         let ignore = IgnoreMatcher::from_patterns(&ignore_pat).unwrap();
 
-                        match worker::handle(task.clone(), &cfg2, &db2, &provider2, &path_cache2, &ignore, tracker2.clone(), &sd2).await {
+                        match worker::handle(task.clone(), &cfg2, &db2, &provider2, &path_cache2, &ignore, tracker2.clone(), &sd2,self.dry_run).await {
                             Ok(_) => {}
                             Err(e) => {
                                 if !is_shutdown_err(&e) && !sd2.is_cancelled() {
@@ -668,7 +670,7 @@ pub async fn run_unconfigured(
                             }
                             Ok(()) => {
                                 info!(local = %primary.local_path.display(), "valid config received, starting engine");
-                                let engine = SyncEngine::new(cfg);
+                                let engine = SyncEngine::new(cfg,false);
                                 return engine.run(db, shutdown, cmd_rx, status_tx).await;
                             }
                         }
