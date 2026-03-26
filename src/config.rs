@@ -1,7 +1,9 @@
 //! Configuration de l'application SyncGDrive V2.
 //!
 //! Ce module gère le chargement, la validation et la sauvegarde de la
-//! configuration TOML. Il intègre la migration automatique depuis la V1.
+//! configuration au format TOML. Il intègre une logique de migration
+//! automatique pour mettre à jour de manière transparente les fichiers
+//! de configuration de la version 1 vers la version 2.
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -74,8 +76,10 @@ fn default_upload_base() -> String {
 fn default_chunk_threshold() -> u64 {
     5 * 1024 * 1024
 }
+
 // ── Structures ────────────────────────────────────────────────────────────────
 
+/// Paramètres de gestion des erreurs réseau (Backoff exponentiel).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RetryConfig {
     #[serde(default = "default_retry_attempts")]
@@ -96,6 +100,7 @@ impl Default for RetryConfig {
     }
 }
 
+/// Paramètres avancés (Tuning) destinés aux utilisateurs experts.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AdvancedConfig {
     #[serde(default = "default_debounce_ms")]
@@ -151,7 +156,9 @@ impl Default for AdvancedConfig {
         }
     }
 }
+
 impl AdvancedConfig {
+    /// Vérifie la cohérence mathématique des paramètres avancés.
     pub fn validate(&self) -> Result<(), ConfigError> {
         if self.engine_channel_capacity == 0 {
             return Err(ConfigError::InvalidAdvanced(
@@ -172,6 +179,7 @@ impl AdvancedConfig {
     }
 }
 
+/// Définition d'un couple (Dossier local ↔ dossier distant) à synchroniser.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyncPair {
     pub name: String,
@@ -186,6 +194,7 @@ pub struct SyncPair {
     pub ignore_patterns: Vec<String>,
 }
 
+/// Structure racine du fichier `config.toml`.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AppConfig {
     #[serde(default = "default_max_workers")]
@@ -204,6 +213,7 @@ pub struct AppConfig {
 
 // ── Erreurs de validation ─────────────────────────────────────────────────────
 
+/// Liste des erreurs possibles lors de la validation des règles de configuration.
 #[derive(Debug, Error)]
 pub enum ConfigError {
     #[error("aucune paire de synchronisation n'est configurée — ouvrez les réglages")]
@@ -220,6 +230,7 @@ pub enum ConfigError {
 
 // ── Chemin de la config ───────────────────────────────────────────────────────
 
+/// Détermine le dossier système approprié pour stocker la configuration (XDG standard).
 pub fn config_dir() -> PathBuf {
     let base = std::env::var("XDG_CONFIG_HOME")
         .map(PathBuf::from)
@@ -230,6 +241,7 @@ pub fn config_dir() -> PathBuf {
     base.join("syncgdrive")
 }
 
+/// Retourne le chemin complet vers le fichier `config.toml`.
 pub fn config_path() -> PathBuf {
     config_dir().join("config.toml")
 }
@@ -237,8 +249,11 @@ pub fn config_path() -> PathBuf {
 // ── Logique Principale ────────────────────────────────────────────────────────
 
 impl AppConfig {
-    /// Charge la config depuis le disque et gère la migration V1 -> V2.
-    /// Retourne `(config, is_first_run)`.
+    /// Charge la config depuis le disque et gère la migration silencieuse V1 -> V2.
+    ///
+    /// # Retours
+    /// Retourne un tuple `(Configuration, is_first_run)` où `is_first_run` vaut `true`
+    /// si un nouveau fichier par défaut vient d'être créé.
     pub fn load_or_create() -> Result<(Self, bool)> {
         let path = config_path();
 
@@ -255,7 +270,7 @@ impl AppConfig {
         let (mut cfg, migrated) = Self::parse_and_migrate(&raw)?;
 
         if migrated {
-            // Création du backup V1
+            // Création sécurisée d'un backup de l'ancienne version V1
             let backup_path = path.with_extension("toml.v1.bak");
             std::fs::write(&backup_path, &raw)
                 .with_context(|| format!("Échec création backup V1: {}", backup_path.display()))?;
@@ -265,7 +280,7 @@ impl AppConfig {
                 backup_path
             );
 
-            // Sauvegarde du nouveau format V2
+            // Sauvegarde du nouveau format V2 validé
             cfg.save()?;
         }
 
@@ -273,11 +288,11 @@ impl AppConfig {
         Ok((cfg, false))
     }
 
-    /// Fonction pure pour tester la logique de parsing et migration sans IO.
+    /// Fonction pure pour tester la logique de parsing et de migration V1 → V2 (sans I/O disque).
     pub fn parse_and_migrate(raw_toml: &str) -> Result<(Self, bool)> {
         let toml_val: toml::Value = toml::from_str(raw_toml).context("Fichier TOML invalide")?;
 
-        // Vérification de la présence de paires V2
+        // 1. Détection du format V2 (présence du tableau `sync_pairs`)
         let has_v2_pairs = toml_val
             .get("sync_pairs")
             .and_then(|v| v.as_array())
@@ -290,16 +305,23 @@ impl AppConfig {
             return Ok((cfg, false));
         }
 
-        // Si pas de paires V2, on tente de migrer les données V1
+        // 2. Si pas de paires V2, on tente de migrer les données depuis la V1
         let mut cfg: AppConfig = toml::from_str(raw_toml)?; // Charge les autres champs (workers, etc.)
         let mut migrated = false;
 
         if let Some(local_root) = toml_val.get("local_root").and_then(|v| v.as_str()) {
             if !local_root.trim().is_empty() {
+                // 🛠️ CORRECTION DRY : On récupère aussi le remote_root s'il existe !
+                let remote_folder_id = toml_val
+                    .get("remote_root")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+
                 cfg.sync_pairs.push(SyncPair {
                     name: "Sync principal".into(),
                     local_path: PathBuf::from(local_root),
-                    remote_folder_id: String::new(), // Sera rempli par OAuth2
+                    remote_folder_id, // Au lieu de String::new()
                     provider: default_provider(),
                     active: true,
                     ignore_patterns: Vec::new(),
@@ -311,6 +333,7 @@ impl AppConfig {
         Ok((cfg, migrated))
     }
 
+    /// Écrit la configuration actuelle sur le disque au format TOML.
     pub fn save(&self) -> Result<()> {
         let path = config_path();
         if let Some(parent) = path.parent() {
@@ -321,6 +344,7 @@ impl AppConfig {
         Ok(())
     }
 
+    /// Valide l'intégrité logique de la configuration (chemins existants, limites).
     pub fn validate(&self) -> Result<(), ConfigError> {
         self.advanced.validate()?;
 
@@ -341,10 +365,12 @@ impl AppConfig {
         Ok(())
     }
 
+    /// Vérifie rapidement si la configuration est prête à être utilisée en production.
     pub fn is_valid(&self) -> bool {
         self.validate().is_ok()
     }
 
+    /// Convertit les chemins relatifs Unix (ex: `~/Projets`) en chemins absolus.
     fn expand_tildes(&mut self) {
         for pair in &mut self.sync_pairs {
             pair.local_path = expand_tilde(&pair.local_path);
@@ -357,7 +383,6 @@ impl AppConfig {
     }
 
     /// Helper V2 : Retourne le premier SyncPair actif (Source de vérité actuelle).
-    /// Remplace tous les appels moches à `primary (cfg.get_primary_pair() = sync_pairs[0])`.
     pub fn get_primary_pair(&self) -> Option<&SyncPair> {
         self.sync_pairs.iter().find(|p| p.active)
     }
@@ -365,6 +390,7 @@ impl AppConfig {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
+/// Remplace le tilde `~` par le chemin absolu vers le dossier utilisateur `HOME`.
 fn expand_tilde(path: &Path) -> PathBuf {
     let s = path.to_string_lossy();
     if s.starts_with("~/") || s == "~" {
@@ -416,7 +442,8 @@ mod tests {
             .context("Pas de paire active")
             .unwrap();
         assert_eq!(primary.local_path, PathBuf::from("/home/user/OldV1"));
-        assert_eq!(cfg.max_workers, 2); // Les autres champs sont préservés.
+        assert_eq!(primary.remote_folder_id, "gdrive:/Backup");
+        assert_eq!(cfg.max_workers, 2);
     }
 
     #[test]

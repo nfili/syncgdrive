@@ -61,7 +61,8 @@ async fn sync_file(
     ctx: &EngineContext,
     ignore: &IgnoreMatcher,
 ) -> Result<()> {
-    if ignore.is_ignored(path) || !path.is_file() {
+    let meta = path.metadata()?;
+    if ignore.is_ignored(path, meta.is_dir()) || !meta.is_file() {
         return Ok(());
     }
 
@@ -209,7 +210,7 @@ async fn delete(
     ctx: &EngineContext,
     ignore: &IgnoreMatcher,
 ) -> Result<()> {
-    if ignore.is_ignored(path) {
+    if ignore.is_ignored(path, path.is_dir()) {
         return Ok(());
     }
 
@@ -242,7 +243,7 @@ async fn rename(
     ctx: &EngineContext,
     ignore: &IgnoreMatcher,
 ) -> Result<()> {
-    if ignore.is_ignored(from) && ignore.is_ignored(to) {
+    if ignore.is_ignored(from, from.is_dir()) && ignore.is_ignored(to, to.is_dir()) {
         return Ok(());
     }
 
@@ -255,7 +256,7 @@ async fn rename(
 
     // Si on ne connait pas l'original, on le traite comme un nouveau fichier
     if from_entry.is_none() || !from_in_db {
-        if to.is_file() && !ignore.is_ignored(to) {
+        if to.is_file() && !ignore.is_ignored(to,to.is_dir()) {
             return sync_file(to, ctx, ignore).await;
         }
         return Ok(());

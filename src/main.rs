@@ -46,7 +46,7 @@ async fn main() -> Result<()> {
     let db_path_buf = std::path::Path::new(&db_path_str);
 
     // On utilise l'orchestrateur de migration que nous avons créé
-    let cfg = migration::run_all_migrations(&config_path, db_path_buf)
+    let cfg = migration::run_all_migrations(&config_path)
         .context("Échec lors de la migration ou du chargement de la configuration")?;
 
     // On considère que c'est un premier run si la config vient d'être créée (et n'a pas de paires).

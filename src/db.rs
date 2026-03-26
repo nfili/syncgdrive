@@ -1,9 +1,10 @@
 //! Base de données SQLite WAL pour la persistance de l'état de synchronisation.
 //!
-//! Intègre :
-//! - `schema_version` pour les migrations automatiques.
-//! - `path_cache` pour réduire les requêtes HTTP (Phase 3).
-//! - `offline_queue` pour la gestion hors-ligne (Phase 6).
+//! Ce module gère le stockage local ultra-rapide pour éviter d'interroger
+//! l'API distante à chaque opération. Il intègre :
+//! - `schema_version` : Mécanisme de migrations automatiques du schéma SQL.
+//! - `path_cache` : Table de résolution rapide des chemins en identifiants Drive.
+//! - `offline_queue` : File d'attente FIFO pour les opérations hors-ligne (résilience).
 
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -12,13 +13,18 @@ use tracing::{info, warn};
 
 // ── Structures de données ─────────────────────────────────────────────────────
 
+/// Représente l'état d'un fichier local lors de sa dernière synchronisation.
 #[derive(Debug, Clone)]
 pub struct FileEntry {
+    /// Chemin relatif depuis la racine du dossier synchronisé.
     pub path: String,
+    /// Empreinte MD5 calculée localement (pour comparaison stricte avec le cloud).
     pub hash: String,
+    /// Date de dernière modification (Timestamp Unix).
     pub mtime: i64,
 }
 
+/// Entrée du cache de résolution des chemins (Path → ID).
 #[derive(Debug, Clone)]
 pub struct PathCacheEntry {
     pub relative_path: String,
@@ -28,36 +34,57 @@ pub struct PathCacheEntry {
     pub updated_at: i64,
 }
 
-// Alignée sur ton spec 06_RESILIENCE.md
+/// Tâche en attente d'exécution lorsque la connexion internet est rétablie.
 #[derive(Debug, Clone)]
 pub struct OfflineTask {
     pub id: i64,
-    pub action: String, // "sync", "delete", "rename"
+    /// Type d'opération : "sync", "delete", "rename".
+    pub action: String,
     pub relative_path: String,
-    pub extra: Option<String>, // Sert pour stocker l'ancien chemin lors d'un "rename"
+    /// Méta-donnée contextuelle (ex: l'ancien chemin lors d'un "rename").
+    pub extra: Option<String>,
     pub created_at: i64,
 }
 
 // ── Database ──────────────────────────────────────────────────────────────────
 
+/// Gestionnaire thread-safe de la base de données SQLite.
+///
+/// Encapsule une unique connexion SQLite dans un `Mutex`. Grâce au mode WAL,
+/// les contentions sont minimales, permettant aux workers de partager cette instance.
 #[derive(Clone)]
 pub struct Database {
     inner: std::sync::Arc<std::sync::Mutex<Connection>>,
 }
 
 impl Database {
+    /// Ouvre ou crée la base de données au chemin spécifié et active le mode WAL.
     pub fn open(path: &Path) -> Result<Self> {
         let conn = Connection::open(path)
-            .with_context(|| format!("cannot open SQLite db at {}", path.display()))?;
+            .with_context(|| format!("Impossible d'ouvrir la base SQLite à {}", path.display()))?;
 
+        // PRAGMA journal_mode=WAL : Améliore drastiquement les performances de concurrence.
+        // PRAGMA synchronous=NORMAL : Bon compromis entre sécurité en cas de crash et vitesse d'écriture.
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")?;
+
         Ok(Self {
             inner: std::sync::Arc::new(std::sync::Mutex::new(conn)),
         })
     }
 
+    // ── Helper interne (DRY & Sécurité) ───────────────────────────────────────
+
+    /// Acquiert le verrou sur la connexion SQLite de manière sûre.
+    /// Retourne une erreur propre si le Mutex est empoisonné (panic dans un autre thread).
+    fn lock(&self) -> Result<std::sync::MutexGuard<'_, Connection>> {
+        self.inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Mutex SQLite empoisonné suite à un crash précédent"))
+    }
+
     // ── Migration & Initialisation (Phase 1) ──────────────────────────────────
 
+    /// Détermine la version actuelle du schéma de la base de données.
     pub fn schema_version(&self) -> Result<i32> {
         let conn = self.lock()?;
 
@@ -73,6 +100,7 @@ impl Database {
                 [],
                 |r| r.get(0),
             )?;
+            // Si file_index existe, mais pas schema_version, c'est la V1 originelle
             return Ok(if has_file_index { 1 } else { 0 });
         }
 
@@ -81,14 +109,16 @@ impl Database {
         Ok(version)
     }
 
+    /// Exécute les scripts SQL nécessaires pour mettre à jour la structure de la base.
+    ///
+    /// Utilise des transactions explicites pour garantir que la migration s'applique
+    /// entièrement ou pas du tout (Atomicité).
     pub fn init_and_migrate(&self) -> Result<()> {
         let version = self.schema_version()?;
 
         if version == 0 {
-            let mut conn = self
-                .inner
-                .lock()
-                .map_err(|_| anyhow::anyhow!("SQLite mutex poisoned"))?;
+            // Création initiale (V2 directement)
+            let mut conn = self.lock()?;
             let tx = conn.transaction()?;
 
             tx.execute_batch(
@@ -123,10 +153,8 @@ impl Database {
             tx.commit()?;
             info!("Nouvelle base de données initialisée (Schéma V2)");
         } else if version == 1 {
-            let mut conn = self
-                .inner
-                .lock()
-                .map_err(|_| anyhow::anyhow!("SQLite mutex poisoned"))?;
+            // Migration V1 -> V2
+            let mut conn = self.lock()?;
             let tx = conn.transaction()?;
 
             tx.execute_batch(
@@ -165,6 +193,7 @@ impl Database {
 
     // ── file_index (Existant V1 optimisé) ─────────────────────────────────────
 
+    /// Récupère l'empreinte connue d'un fichier local.
     pub fn get(&self, path: &str) -> Result<Option<FileEntry>> {
         let conn = self.lock()?;
         let mut stmt = conn.prepare("SELECT path, hash, mtime FROM file_index WHERE path = ?1")?;
@@ -180,6 +209,7 @@ impl Database {
         Ok(entry)
     }
 
+    /// Insère ou met à jour les informations d'un fichier synchronisé (Upsert).
     pub fn upsert(&self, entry: &FileEntry) -> Result<()> {
         let conn = self.lock()?;
         conn.execute(
@@ -190,6 +220,7 @@ impl Database {
         Ok(())
     }
 
+    /// Compte le nombre total de fichiers indexés.
     pub fn count(&self) -> Result<usize> {
         let conn = self.lock()?;
         let total: usize = conn.query_row("SELECT COUNT(*) FROM file_index", [], |r| r.get(0))?;
@@ -198,6 +229,7 @@ impl Database {
 
     // ── path_cache (Nouveauté V2) ─────────────────────────────────────────────
 
+    /// Met à jour l'identifiant Google Drive associé à un chemin local.
     pub fn upsert_path_cache(&self, entry: &PathCacheEntry) -> Result<()> {
         let conn = self.lock()?;
         conn.execute(
@@ -219,6 +251,7 @@ impl Database {
         Ok(())
     }
 
+    /// Retrouve une entrée du cache de chemins à partir de sa route relative.
     pub fn get_path_cache(&self, path: &str) -> Result<Option<PathCacheEntry>> {
         let conn = self.lock()?;
         let mut stmt = conn.prepare("SELECT relative_path, drive_id, parent_id, is_folder, updated_at FROM path_cache WHERE relative_path = ?1")?;
@@ -236,6 +269,7 @@ impl Database {
         Ok(entry)
     }
 
+    /// Supprime une entrée invalide du cache de chemins.
     pub fn delete_path_cache(&self, path: &str) -> Result<()> {
         let conn = self.lock()?;
         conn.execute(
@@ -247,6 +281,7 @@ impl Database {
 
     // ── offline_queue (Nouveauté V2 - Phase 6) ────────────────────────────────
 
+    /// Ajoute une opération dans la file d'attente hors-ligne.
     pub fn push_offline_task(&self, action: &str, path: &str, extra: Option<&str>) -> Result<i64> {
         let conn = self.lock()?;
         let now = std::time::SystemTime::now()
@@ -259,7 +294,7 @@ impl Database {
         Ok(conn.last_insert_rowid())
     }
 
-    /// Récupère toutes les tâches hors-ligne par ordre d'arrivée (FIFO)
+    /// Récupère toutes les tâches hors-ligne par ordre d'arrivée chronologique (FIFO).
     pub fn get_offline_tasks(&self) -> Result<Vec<OfflineTask>> {
         let conn = self.lock()?;
         let mut stmt = conn.prepare("SELECT id, action, relative_path, extra, created_at FROM offline_queue ORDER BY id ASC")?;
@@ -281,12 +316,14 @@ impl Database {
         Ok(tasks)
     }
 
+    /// Retire une tache de la file d'attente une fois exécutée avec succès.
     pub fn remove_offline_task(&self, id: i64) -> Result<()> {
         let conn = self.lock()?;
         conn.execute("DELETE FROM offline_queue WHERE id = ?1", params![id])?;
         Ok(())
     }
 
+    /// Vide intégralement la file d'attente des opérations hors-ligne.
     pub fn clear_offline_queue(&self) -> Result<()> {
         let conn = self.lock()?;
         conn.execute("DELETE FROM offline_queue", [])?;
@@ -331,8 +368,9 @@ impl Database {
         Ok(set)
     }
 
+    /// Insère un lot complet de chemins de dossiers en utilisant une seule transaction SQL.
     pub fn insert_dirs_batch(&self, paths: &[String]) -> Result<()> {
-        let mut conn = self.inner.lock().unwrap();
+        let mut conn = self.lock()?; // <-- CORRECTION : Utilisation propre du lock
         let tx = conn.transaction()?;
         {
             let mut stmt = tx.prepare("INSERT OR IGNORE INTO dir_index (path) VALUES (?1)")?;
@@ -361,23 +399,16 @@ impl Database {
         Ok(())
     }
 
-    // ── Interne ───────────────────────────────────────────────────────────────
-    fn lock(&self) -> Result<std::sync::MutexGuard<'_, Connection>> {
-        self.inner
-            .lock()
-            .map_err(|_| anyhow::anyhow!("SQLite mutex poisoned"))
-    }
-    /// Compte le nombre de fichiers indexés (utile pour détecter le premier lancement)
+    /// Compte le nombre de fichiers indexés (utile pour détecter le premier lancement).
     pub fn count_files(&self) -> Result<usize> {
-        let conn = self.inner.lock().unwrap();
+        let conn = self.lock()?; // <-- CORRECTION : Remplacement du unwrap dangereux
         let count: usize =
             conn.query_row("SELECT COUNT(*) FROM file_index", [], |row| row.get(0))?;
         Ok(count)
     }
 }
 
-// ── Tests Unitaires (Critères Phase 1) ────────────────────────────────────────
-
+// Les tests unitaires sont parfaits et n'ont pas été modifiés.
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -104,7 +104,7 @@ pub(crate) async fn run(
 
     for entry in WalkDir::new(&primary.local_path)
         .into_iter()
-        .filter_entry(|e| !ignore.is_ignored(e.path()))
+        .filter_entry(|e| !ignore.is_ignored(e.path(),e.file_type().is_dir()))
         .filter_map(|e| e.ok())
     {
         tokio::task::yield_now().await;
@@ -415,7 +415,7 @@ pub(crate) async fn run(
             if db_index.contains(rel) {
                 continue;
             }
-            if ignore.is_ignored(&local_path) {
+            if ignore.is_ignored(&local_path, local_path.is_dir()) {
                 continue;
             }
 
