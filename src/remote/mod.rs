@@ -1,3 +1,10 @@
+//! Couche d'abstraction pour les fournisseurs de stockage distant.
+//!
+//! Ce module définit le contrat `RemoteProvider` que tout service cloud
+//! (Google Drive, Dropbox, AWS S3, etc.) doit respecter pour s'intégrer
+//! au moteur de synchronisation. Il contient également les structures de
+//! données standardisées utilisées pour normaliser les réponses des API.
+
 use anyhow::Result;
 use async_trait::async_trait;
 use std::path::Path;
@@ -5,6 +12,10 @@ pub mod gdrive;
 pub mod path_cache;
 
 /// Le contrat que doit remplir tout fournisseur de stockage distant (Google Drive, etc.)
+///
+/// L'utilisation de `async_trait` permet de définir des méthodes asynchrones
+/// dans le trait, indispensables pour les opérations réseau. Les contraintes
+/// `Send + Sync` garantissent que le fournisseur peut être partagé entre les workers Tokio.
 #[async_trait]
 pub trait RemoteProvider: Send + Sync {
     // ── Listing ──────────────────────────────────────────
@@ -51,13 +62,14 @@ pub trait RemoteProvider: Send + Sync {
 
 // ── Types de données ──────────────────────────────────
 
-/// Index distant : fichiers et dossiers avec leurs IDs.
+/// Index distant : Représentation plate de l'arborescence du cloud.
 #[derive(Debug, Clone)]
 pub struct RemoteIndex {
     pub files: Vec<RemoteFile>,
     pub dirs: Vec<RemoteDir>,
 }
 
+/// Représentation standardisée d'un fichier distant.
 #[derive(Debug, Clone)]
 pub struct RemoteFile {
     pub relative_path: String,
@@ -68,6 +80,7 @@ pub struct RemoteFile {
     pub modified_time: i64,
 }
 
+/// Représentation standardisée d'un dossier distant.
 #[derive(Debug, Clone)]
 pub struct RemoteDir {
     pub relative_path: String,
@@ -75,6 +88,7 @@ pub struct RemoteDir {
     pub parent_id: String,
 }
 
+/// Bilan renvoyé par le fournisseur après un upload réussi.
 #[derive(Debug, Clone)]
 pub struct UploadResult {
     pub drive_id: String,
@@ -82,6 +96,7 @@ pub struct UploadResult {
     pub size_bytes: u64,
 }
 
+/// Page de résultats pour la synchronisation différentielle (Delta).
 #[derive(Debug, Clone)]
 pub struct ChangesPage {
     pub changes: Vec<Change>,
@@ -89,6 +104,7 @@ pub struct ChangesPage {
     pub has_more: bool,
 }
 
+/// Type de modification survenue sur le cloud.
 #[derive(Debug, Clone)]
 pub enum Change {
     Modified {
@@ -101,6 +117,7 @@ pub enum Change {
     },
 }
 
+/// État de santé de la connexion avec le fournisseur cloud.
 #[derive(Debug, Clone)]
 pub enum HealthStatus {
     Ok {

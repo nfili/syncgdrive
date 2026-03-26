@@ -1,3 +1,9 @@
+//! Cache mémoire thread-safe pour la résolution des chemins.
+//!
+//! Ce module évite d'interroger Google Drive à chaque fois que l'on a besoin de
+//! l'ID d'un parent. Il maintient une table de correspondance (`HashMap`) entre
+//! les chemins relatifs locaux et les identifiants uniques (IDs) du cloud.
+
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -7,11 +13,16 @@ use super::RemoteIndex;
 /// Représente une entrée dans le cache
 #[derive(Debug, Clone, PartialEq)]
 pub struct CacheEntry {
+    /// L'identifiant unique du fichier/dossier sur le cloud.
     pub drive_id: String,
+    /// L'identifiant unique du dossier parent sur le cloud.
     pub parent_id: String,
 }
 
-/// Le PathCache mappe les chemins relatifs Arch Linux vers les IDs Google Drive
+/// Le PathCache mappe les chemins relatifs Arch Linux vers les IDs Google Drive.
+///
+/// Enveloppé dans un `RwLock` asynchrone pour permettre de multiples lectures
+/// simultanées (workers) sans blocage, tout en sécurisant les écritures.
 #[derive(Clone, Default)]
 pub struct PathCache {
     // Clé: chemin relatif (ex: "Projets/SyncGDrive/src") -> Valeur: CacheEntry
@@ -19,19 +30,21 @@ pub struct PathCache {
 }
 
 impl PathCache {
+    /// Instancie un nouveau cache vide.
     pub fn new() -> Self {
         Self {
             entries: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
+    /// Recherche une entrée dans le cache à partir de son chemin relatif.
     /// `test_lookup_existing` & `test_lookup_missing`
     pub async fn lookup(&self, relative_path: &str) -> Option<CacheEntry> {
         let map = self.entries.read().await;
         map.get(relative_path).cloned()
     }
 
-    /// Ajoute ou met à jour une entrée
+    /// Ajoute ou met à jour une entrée dans le cache.
     pub async fn insert(&self, relative_path: &str, drive_id: &str, parent_id: &str) {
         let mut map = self.entries.write().await;
         map.insert(
@@ -43,6 +56,7 @@ impl PathCache {
         );
     }
 
+    /// Reconstruit intégralement le cache à partir d'un index distant fraîchement téléchargé.
     /// `test_rebuild_from_index` : Reconstruit le cache à partir d'un RemoteIndex complet
     pub async fn rebuild_from_index(&self, index: &RemoteIndex) {
         let mut map = self.entries.write().await;
@@ -71,6 +85,7 @@ impl PathCache {
         }
     }
 
+    /// Supprime un dossier et toutes ses sous-entrées du cache.
     /// `test_remove_cascades` : Supprime un dossier ET tous ses enfants du cache
     pub async fn remove_cascades(&self, relative_path: &str) {
         let mut map = self.entries.write().await;
@@ -83,6 +98,7 @@ impl PathCache {
         map.retain(|path, _| !path.starts_with(&prefix));
     }
 
+    /// Trouve le parent le plus profond déjà connu dans le cache.
     /// `test_resolve_nested_path` : Utile pour le Mkdir.
     /// Pour "a/b/c", retourne le chemin le plus profond connu et son ID.
     pub async fn resolve_deepest_known_parent(
