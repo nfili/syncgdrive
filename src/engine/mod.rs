@@ -561,24 +561,28 @@ impl SyncEngine {
                         _ = shutdown.cancelled() => { break; }
                     };
 
-                    let db2 = db.clone();
-                    let provider2 = provider.clone();
-                    let path_cache2 = path_cache.clone();
-                    let cfg2 = self.cfg.clone(); // Le worker reçoit la VRAIE config à jour
-                    let sd2 = shutdown.clone();
+                    let ctx2= EngineContext{
+                        cfg: self.cfg.clone(),
+                        db: db.clone(),
+                        provider: provider.clone(),
+                        path_cache: path_cache.clone(),
+                        tracker: tracker.clone(),
+                        shutdown: shutdown.clone(),
+                        dry_run: self.dry_run,
+                    };
+
                     let stx2 = status_tx.clone();
                     let active2 = active.clone();
-                    let tracker2 = tracker.clone();
 
-                    let current_primary = cfg2.get_primary_pair().context("Aucun dossier")?;
+                    let current_primary = ctx2.cfg.get_primary_pair().context("Aucun dossier")?;
                     let ignore_pat = current_primary.ignore_patterns.clone();
 
                     active2.fetch_add(1, Ordering::Relaxed);
 
                     tokio::spawn(async move {
                        let _permit = permit;
-                        if sd2.is_cancelled() {
-                            tracker2.done_files.fetch_add(1, Ordering::Relaxed);
+                        if ctx2.shutdown.is_cancelled() {
+                            ctx2.tracker.done_files.fetch_add(1, Ordering::Relaxed);
                             let prev = active2.fetch_sub(1, Ordering::Relaxed);
                             if prev == 1 { let _ = stx2.send(EngineStatus::Idle); }
                             return;
@@ -586,20 +590,20 @@ impl SyncEngine {
 
                         let ignore = IgnoreMatcher::from_patterns(&ignore_pat).unwrap();
 
-                        match worker::handle(task.clone(), &cfg2, &db2, &provider2, &path_cache2, &ignore, tracker2.clone(), &sd2,self.dry_run).await {
+                        match worker::handle(task.clone(), &ctx2, &ignore).await {
                             Ok(_) => {}
                             Err(e) => {
-                                if !is_shutdown_err(&e) && !sd2.is_cancelled() {
+                                if !is_shutdown_err(&e) && !ctx2.shutdown.is_cancelled() {
                                     warn!("❌ ERREUR OUVRIER : {:?}", e);
                                     let _ = stx2.send(EngineStatus::Error(e.to_string()));
                                     if scan::is_quota_err(&e) {
-                                        crate::notif::quota_exceeded(&cfg2);
+                                        crate::notif::quota_exceeded(&ctx2.cfg);
                                     }
                                 }
                             }
                         }
 
-                        tracker2.done_files.fetch_add(1, Ordering::Relaxed);
+                        ctx2.tracker.done_files.fetch_add(1, Ordering::Relaxed);
                         let prev = active2.fetch_sub(1, Ordering::Relaxed);
                         if prev == 1 {
                             let _ = stx2.send(EngineStatus::Idle);
