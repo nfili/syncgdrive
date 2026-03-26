@@ -1,36 +1,61 @@
+
+//! Stockage chiffré des jetons d'accès.
+//!
+//! Ce module protège les jetons d'authentification (Access Token et Refresh Token)
+//! stockés sur le disque dur. Il utilise l'algorithme de chiffrement authentifié
+//! **AES-256-GCM** pour garantir à la fois la confidentialité et l'intégrité des données.
+//!
+//! La clé de chiffrement maîtresse est dérivée du secret client (`SYNCGDRIVE_CLIENT_SECRET`)
+//! via un hachage SHA-256.
+
 use super::GoogleTokens;
 use anyhow::{Context, Result};
 use std::path::PathBuf;
 
-// Importation des outils de cryptographie (déjà dans ton Cargo.toml et worker)
 use aes_gcm::{
     aead::{Aead, AeadCore, KeyInit, OsRng},
     Aes256Gcm, Key, Nonce,
 };
 use sha2::{Digest, Sha256};
 
+/// Trait définissant le contrat pour le stockage persistant des jetons.
+///
+/// Les contraintes `Send + Sync` garantissent que l'implémentation peut être
+/// partagée en toute sécurité entre plusieurs threads (workers Tokio).
 pub trait TokenStorage: Send + Sync {
+    /// Chiffre et sauvegarde les jetons sur le support de stockage.
     fn store(&self, tokens: &GoogleTokens) -> Result<()>;
+    /// Charge et déchiffre les jetons. Retourne `None` s'ils n'existent pas.
     fn load(&self) -> Result<Option<GoogleTokens>>;
+    /// Supprime définitivement les jetons du support de stockage.
     fn clear(&self) -> Result<()>;
 }
 
-/// Stockage chiffré (AES-256-GCM) dans un fichier local
+/// Implémentation de `TokenStorage` utilisant un fichier local chiffré.
+///
+/// Le fichier généré contiendra :
+/// `[Nonce (12 octets)] + [Texte chiffré + Tag d'authentification GCM]`
 pub struct EncryptedFileStorage {
+    /// Chemin absolu vers le fichier chiffré (ex: `~/.config/syncgdrive/tokens.enc`).
     path: PathBuf,
+    /// Instance pré-configurée de l'algorithme AES-256-GCM.
     cipher: Aes256Gcm,
 }
 
 impl EncryptedFileStorage {
+    /// Initialise le gestionnaire de stockage et dérive la clé cryptographique.
+    ///
+    /// # Erreurs
+    /// Retourne une erreur si la variable d'environnement `SYNCGDRIVE_CLIENT_SECRET`
+    /// est manquante, car elle est indispensable pour dériver la clé de chiffrement.
     pub fn new() -> Result<Self> {
-        // Le fichier portera l'extension .enc
         let path = crate::config::config_dir().join("tokens.enc");
 
-        // On récupère le secret de ton .env pour dériver une clé de chiffrement robuste
         let app_secret = std::env::var("SYNCGDRIVE_CLIENT_SECRET")
-            .context("SYNCGDRIVE_CLIENT_SECRET manquant pour le chiffrement")?;
+            .context("SYNCGDRIVE_CLIENT_SECRET manquant pour le chiffrement. Avez-vous configuré votre fichier .env ?")?;
 
-        // Le hash SHA-256 garantit une clé de 32 octets (256 bits) parfaite pour l'AES
+        // L'AES-256 nécessite exactement une clé de 32 octets (256 bits).
+        // On utilise SHA-256 pour transformer le secret de longueur variable en une clé fixe.
         let key_bytes = Sha256::digest(app_secret.as_bytes());
         let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key_bytes));
 
@@ -40,30 +65,32 @@ impl EncryptedFileStorage {
 
 impl TokenStorage for EncryptedFileStorage {
     fn store(&self, tokens: &GoogleTokens) -> Result<()> {
-        let json = serde_json::to_string(tokens).context("Erreur de sérialisation des tokens")?;
+        let json = serde_json::to_string(tokens).context("Erreur de sérialisation des tokens vers JSON")?;
 
-        // Génération d'un vecteur d'initialisation unique (Nonce) de 12 octets
+        // Génération d'un vecteur d'initialisation (Nonce) unique et aléatoire pour chaque écriture.
+        // C'est vital pour la sécurité de l'AES-GCM afin d'éviter les attaques par réutilisation de Nonce.
         let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
 
-        // Chiffrement
+        // Chiffrement : Le résultat contient le texte chiffré ET le tag d'authentification (MAC)
         let ciphertext = self
             .cipher
             .encrypt(&nonce, json.as_bytes())
-            .map_err(|e| anyhow::anyhow!("Échec du chiffrement AES: {:?}", e))?;
+            .map_err(|e| anyhow::anyhow!("Échec du chiffrement AES-256-GCM : {:?}", e))?;
 
-        // On concatène le Nonce (nécessaire au déchiffrement) et le texte chiffré
+        // Format du fichier : On préfixe le texte chiffré par le Nonce en clair (il n'est pas secret)
         let mut file_content = nonce.to_vec();
         file_content.extend_from_slice(&ciphertext);
 
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)
-                .context("Impossible de créer le dossier parent pour les tokens")?;
+                .context("Impossible de créer l'arborescence du dossier de configuration")?;
         }
 
         std::fs::write(&self.path, &file_content)
-            .context("Impossible d'écrire le fichier chiffré")?;
+            .context("Impossible d'écrire le fichier chiffré sur le disque")?;
 
-        // On garde quand même la ceinture et les bretelles avec chmod 600
+        // Défense en profondeur : on restreint les droits d'accès au niveau de l'OS (Unix uniquement).
+        // Seul le propriétaire (l'utilisateur exécutant l'app) aura le droit de lecture/écriture.
         #[cfg(target_os = "linux")]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -82,32 +109,32 @@ impl TokenStorage for EncryptedFileStorage {
             return Ok(None);
         }
 
-        let data = std::fs::read(&self.path).context("Impossible de lire le fichier chiffré")?;
+        let data = std::fs::read(&self.path).context("Impossible de lire le fichier chiffré depuis le disque")?;
 
-        // Le fichier doit faire au moins la taille du nonce (12 octets)
-        if data.len() < 12 {
-            anyhow::bail!("Fichier de tokens corrompu (trop court)");
+        // Pré-validation : un fichier valide contient au minimum le Nonce (12 octets) + le Tag GCM (16 octets)
+        if data.len() < 28 {
+            anyhow::bail!("Fichier de tokens corrompu (taille insuffisante pour contenir un Nonce et un MAC)");
         }
 
         let nonce = Nonce::from_slice(&data[..12]);
         let ciphertext = &data[12..];
 
-        // Déchiffrement
+        // Déchiffrement et validation de l'intégrité (vérification du Tag GCM interne)
         let plaintext = self.cipher.decrypt(nonce, ciphertext).map_err(|_| {
-            anyhow::anyhow!("Échec du déchiffrement. Le CLIENT_SECRET a-t-il changé ?")
+            anyhow::anyhow!("Échec du déchiffrement. Le CLIENT_SECRET a-t-il été modifié depuis la dernière connexion ?")
         })?;
 
         let json = String::from_utf8(plaintext)
-            .context("Les données déchiffrées ne sont pas du texte valide")?;
+            .context("Les données déchiffrées ne forment pas une chaîne de caractères UTF-8 valide")?;
 
-        let tokens = serde_json::from_str(&json).context("Structure JSON des tokens corrompue")?;
+        let tokens = serde_json::from_str(&json).context("Structure JSON des tokens illisible ou corrompue")?;
 
         Ok(Some(tokens))
     }
 
     fn clear(&self) -> Result<()> {
         if self.path.exists() {
-            std::fs::remove_file(&self.path)?;
+            std::fs::remove_file(&self.path).context("Impossible de supprimer le fichier de tokens")?;
         }
         Ok(())
     }
