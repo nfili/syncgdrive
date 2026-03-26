@@ -1,3 +1,8 @@
+//! Fenêtre des réglages de l'application (Libadwaita).
+//!
+//! Ce module gère l'interface de configuration, incluant la sélection des dossiers,
+//! la connexion OAuth2 interactive, et la gestion dynamique des exclusions (patterns glob).
+
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
@@ -6,8 +11,13 @@ use libadwaita::prelude::*;
 
 use crate::config::AppConfig;
 use crate::engine::EngineCommand;
+
 // ── Standalone runner ─────────────────────────────────────────────────────────
 
+/// Affiche la fenêtre des réglages depuis le thread principal (GTK).
+///
+/// Met le moteur de synchronisation en pause pendant l'édition,
+/// et applique la nouvelle configuration (ou annule la pause) à la fermeture.
 pub fn show_settings_in_app(
     app: &libadwaita::Application,
     cmd_tx: tokio::sync::mpsc::Sender<EngineCommand>,
@@ -31,7 +41,7 @@ pub fn show_settings_in_app(
         let _ = cmd_tx.try_send(EngineCommand::ApplyConfig(Arc::new(new_cfg)));
         let _ = cmd_tx.try_send(EngineCommand::Resume);
     })
-    .expect("Erreur création fenêtre réglages");
+        .expect("Erreur création fenêtre réglages");
 
     // 3. Si on ferme avec la croix sans enregistrer, on enlève la pause !
     win.connect_close_request(move |_| {
@@ -46,6 +56,7 @@ pub fn show_settings_in_app(
 
 // ── Fenêtre Settings ──────────────────────────────────────────────────────────
 
+/// Construit et configure la fenêtre principale des réglages (UI Builder).
 pub fn open<F>(
     app: &libadwaita::Application,
     config: Arc<Mutex<AppConfig>>,
@@ -108,6 +119,7 @@ where
         .css_classes(["flat"])
         .build();
     local_row.add_suffix(&local_browse_btn);
+
     {
         let lr = local_row.clone();
         let win_weak = win.downgrade();
@@ -157,6 +169,7 @@ where
         .build();
     auth_row.add_suffix(&btn_google);
 
+    // Initialisation asynchrone du statut de connexion OAuth2
     if is_connected {
         btn_google.set_label("Révoquer l'accès");
         btn_google.add_css_class("destructive-action");
@@ -166,20 +179,7 @@ where
 
         gtk4::glib::MainContext::default().spawn_local(async move {
             let (tx, rx) = tokio::sync::oneshot::channel();
-
-            std::thread::spawn(move || {
-                let rt = tokio::runtime::Runtime::new().unwrap();
-                let res = rt.block_on(async {
-                    let local_auth = crate::auth::GoogleAuth::new();
-                    let email = local_auth
-                        .get_user_email()
-                        .await
-                        .unwrap_or_else(|_| "Inconnu".into());
-                    let expiry = local_auth.get_token_expiration_date();
-                    (email, expiry)
-                });
-                let _ = tx.send(res);
-            });
+            fetch_auth_info_async(tx);
 
             if let Ok((email, expiry)) = rx.await {
                 auth_row_init.set_subtitle(&format!(
@@ -199,6 +199,7 @@ where
     let overlay_clone = toast_overlay.clone();
     let auth_row_closure = auth_row.clone();
 
+    // Gestion du clic sur le bouton "Lier / Révoquer"
     btn_google.connect_clicked(move |clicked_btn| {
         let auth = crate::auth::GoogleAuth::new();
 
@@ -209,7 +210,7 @@ where
             gtk4::glib::MainContext::default().spawn_local(async move {
                 let (tx, rx) = tokio::sync::oneshot::channel();
                 std::thread::spawn(move || {
-                    let rt = tokio::runtime::Runtime::new().expect("Erreur runtime Tokio");
+                    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("Erreur runtime");
                     let res = rt.block_on(async {
                         let local_auth = crate::auth::GoogleAuth::new();
                         local_auth.revoke_token().await
@@ -241,8 +242,7 @@ where
                 let (tx, rx) = tokio::sync::oneshot::channel();
 
                 std::thread::spawn(move || {
-                    let rt =
-                        tokio::runtime::Runtime::new().expect("Erreur runtime Tokio temporaire");
+                    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("Erreur runtime");
                     let res = rt.block_on(async {
                         let creds = crate::auth::OAuthAppCredentials::default();
                         crate::auth::oauth2::authenticate(&creds).await
@@ -267,19 +267,7 @@ where
 
                             gtk4::glib::MainContext::default().spawn_local(async move {
                                 let (tx_info, rx_info) = tokio::sync::oneshot::channel();
-                                std::thread::spawn(move || {
-                                    let rt = tokio::runtime::Runtime::new().unwrap();
-                                    let info = rt.block_on(async {
-                                        let auth_info = crate::auth::GoogleAuth::new();
-                                        let email = auth_info
-                                            .get_user_email()
-                                            .await
-                                            .unwrap_or_else(|_| "Inconnu".into());
-                                        let expiry = auth_info.get_token_expiration_date();
-                                        (email, expiry)
-                                    });
-                                    let _ = tx_info.send(info);
-                                });
+                                fetch_auth_info_async(tx_info);
 
                                 if let Ok((email, expiry)) = rx_info.await {
                                     auth_row_success.set_subtitle(&format!(
@@ -463,6 +451,7 @@ where
     let win2 = win.clone();
     let overlay2 = toast_overlay.clone();
 
+    // Validation finale et sauvegarde
     btn_save.connect_clicked(move |_| {
         let local = local_row2.text().to_string();
         let remote = remote_row2.text().to_string();
@@ -518,6 +507,7 @@ where
 //  Helpers Validation Live
 // ══════════════════════════════════════════════════════════════════════════════
 
+/// Remplace le tilde `~` par le chemin absolu vers le dossier `HOME`.
 fn settings_expand_tilde(text: &str) -> std::path::PathBuf {
     if text.starts_with("~/") || text == "~" {
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
@@ -527,6 +517,7 @@ fn settings_expand_tilde(text: &str) -> std::path::PathBuf {
     }
 }
 
+/// Vérifie de manière synchrone si le chemin local fourni pointe vers un dossier valide.
 fn is_local_valid(text: &str) -> bool {
     if text.trim().is_empty() {
         return false;
@@ -535,7 +526,7 @@ fn is_local_valid(text: &str) -> bool {
     path.is_dir()
 }
 
-/// NOUVEAU : Validation adaptée pour accepter les IDs Google Drive
+/// Validation adaptée pour accepter les IDs Google Drive et URL rétrocompatibles.
 fn is_remote_valid(text: &str) -> bool {
     let text = text.trim();
     if text.is_empty() {
@@ -588,6 +579,7 @@ fn update_remote_status(row: &libadwaita::EntryRow, icon: &gtk4::Image) {
     }
 }
 
+/// N'active le bouton "Enregistrer" que si les deux champs obligatoires sont valides.
 fn update_save_sensitivity(
     local_row: &libadwaita::EntryRow,
     remote_row: &libadwaita::EntryRow,
@@ -595,6 +587,29 @@ fn update_save_sensitivity(
 ) {
     let ok = is_local_valid(&local_row.text()) && is_remote_valid(&remote_row.text());
     btn_save.set_sensitive(ok);
+}
+
+/// Lance un thread isolé avec un runtime Tokio léger pour récupérer
+/// les informations du compte Google (Email et Expiration du jeton).
+fn fetch_auth_info_async(tx: tokio::sync::oneshot::Sender<(String, String)>) {
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("Impossible de créer le runtime Tokio");
+
+        let res = rt.block_on(async {
+            let auth = crate::auth::GoogleAuth::new();
+            let email = auth
+                .get_user_email()
+                .await
+                .unwrap_or_else(|_| "Inconnu".into());
+            let expiry = auth.get_token_expiration_date();
+            (email, expiry)
+        });
+
+        let _ = tx.send(res);
+    });
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -640,6 +655,7 @@ fn collect_patterns(list: &gtk4::ListBox) -> Vec<String> {
     patterns
 }
 
+/// Ouvre le sélecteur natif de GTK pour choisir dynamiquement des dossiers à exclure.
 fn browse_exclude(
     win: &libadwaita::Window,
     list: &gtk4::ListBox,
@@ -680,6 +696,8 @@ fn browse_exclude(
     });
 }
 
+/// Génère un pattern glob (ex: `**/*.log`) à partir d'un chemin sélectionné 
+/// relativement à la racine du dossier synchronisé.
 fn path_to_glob(local_root_text: &str, selected: &std::path::Path) -> String {
     let local_root = std::path::Path::new(local_root_text);
     let name = selected
@@ -707,6 +725,7 @@ fn path_to_glob(local_root_text: &str, selected: &std::path::Path) -> String {
     }
 }
 
+/// Affiche une sous-fenêtre permettant d'entrer manuellement un glob pattern.
 fn show_add_glob_dialog(
     win: &libadwaita::Window,
     list: &gtk4::ListBox,

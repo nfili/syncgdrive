@@ -1,5 +1,8 @@
 //! Systray KSNI : StatusNotifierItem + tooltip dynamique + menu contextuel.
-//! Intègre les icônes SVG animées et la gestion de la fenêtre de Scan (Phase 7).
+//!
+//! Intègre les icônes SVG animées via une boucle d'horloge interne (ticker)
+//! et gère l'interaction avec le moteur de synchronisation. Il expose également
+//! un canal de diffusion (`watch`) pour alimenter la fenêtre de Scan de manière découplée.
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -14,9 +17,11 @@ use crate::ui::icons::{get_icon_pixmap, TrayIcon};
 use gtk4::prelude::*;
 
 // ── Canal global pour diffuser le statut à la fenêtre de Scan ───────────────
+// Utilisation d'un OnceLock pour un singleton thread-safe.
 static SCAN_TX: std::sync::OnceLock<tokio::sync::watch::Sender<EngineStatus>> =
     std::sync::OnceLock::new();
 
+/// Permet à d'autres fenêtres (ex: ScanWindow) de s'abonner aux mises à jour d'état.
 pub fn get_scan_rx() -> tokio::sync::watch::Receiver<EngineStatus> {
     SCAN_TX
         .get_or_init(|| tokio::sync::watch::channel(EngineStatus::Starting(0)).0)
@@ -26,6 +31,8 @@ pub fn get_scan_rx() -> tokio::sync::watch::Receiver<EngineStatus> {
 // ══════════════════════════════════════════════════════════════════════════════
 //  Public API
 // ══════════════════════════════════════════════════════════════════════════════
+
+/// Démarre le gestionnaire de l'icône de la zone de notification (Systray).
 pub fn spawn_tray(
     cmd_tx: tokio::sync::mpsc::Sender<EngineCommand>,
     mut status_rx: tokio::sync::mpsc::UnboundedReceiver<EngineStatus>,
@@ -64,6 +71,7 @@ pub fn spawn_tray(
         match tray.spawn().await {
             Ok(handle) => {
                 tracing::info!("systray prêt (SVG Animé)");
+                // Ticker à 200ms pour une animation fluide à ~5 FPS
                 let mut animation_tick =
                     tokio::time::interval(std::time::Duration::from_millis(200));
 
@@ -72,7 +80,7 @@ pub fn spawn_tray(
                         biased;
                         _ = sd.cancelled() => break,
 
-                        // Boucle d'animation à 300ms
+                        // Boucle d'animation à 200ms
                         _ = animation_tick.tick() => {
                             let mut needs_update = false;
                             {
@@ -90,6 +98,7 @@ pub fn spawn_tray(
                             }
                         }
 
+                        // Réception d'un nouvel état depuis le moteur
                         maybe = status_rx.recv() => {
                             match maybe {
                                 Some(s) => {
@@ -137,6 +146,7 @@ pub fn spawn_tray(
 //  SyncTray
 // ══════════════════════════════════════════════════════════════════════════════
 
+/// Implémentation du trait `ksni::Tray` représentant le composant systray.
 struct SyncTray {
     status: Arc<Mutex<EngineStatus>>,
     cmd_tx: tokio::sync::mpsc::Sender<EngineCommand>,
@@ -229,7 +239,7 @@ impl ksni::Tray for SyncTray {
             EngineStatus::Error(_) => "SyncGDrive — Erreur".into(),
             EngineStatus::Stopped => "SyncGDrive — Arrêté".into(),
             EngineStatus::Settings => "SyncGDrive — Paramètres".into(),
-            EngineStatus::Help => "SincGDrive — Aide & Configuration".into(),
+            EngineStatus::Help => "SyncGDrive — Aide & Configuration".into(),
         };
         if self.dry_run {
             format!("{} 🛡️ (SIMULATION)", base_title)
@@ -321,16 +331,16 @@ impl ksni::Tray for SyncTray {
 
                 // (
                 //     format!("Transfert {}/{}", current_idx, snap.total_files),
-                    format!(
-                        "{}\n{} {:.0}% · {}/s · {}\nTotal : {} / {}",
-                        formatted_path,
-                        bar,
-                        global_pct,
-                        human_size(snap.speed_bps),
-                        snap.eta_string,
-                        human_size(snap.sent_bytes),
-                        human_size(snap.total_bytes)
-                    )
+                format!(
+                    "{}\n{} {:.0}% · {}/s · {}\nTotal : {} / {}",
+                    formatted_path,
+                    bar,
+                    global_pct,
+                    human_size(snap.speed_bps),
+                    snap.eta_string,
+                    human_size(snap.sent_bytes),
+                    human_size(snap.total_bytes)
+                )
                 // )
             }
             EngineStatus::Syncing { .. } => "Transferts vers Google Drive…".into(),
@@ -338,7 +348,7 @@ impl ksni::Tray for SyncTray {
             EngineStatus::Error(e) => format!("{e}\nVérifiez les logs ou les tokens KIO."),
             EngineStatus::Stopped => "Le moteur est arrêté.".into(),
             EngineStatus::Settings => "Synchronisation en pause pendant la configuration.".into(), // <-- Explication claire
-            EngineStatus::Help => "Synchronisatin en pause pendant l'affichage de la fenêtre.".into(),
+            EngineStatus::Help => "Synchronisation en pause pendant l'affichage de la fenêtre.".into(),
         };
 
         ksni::ToolTip {
@@ -368,7 +378,7 @@ impl ksni::Tray for SyncTray {
                 enabled: false,
                 ..Default::default()
             }
-            .into(),
+                .into(),
         );
         items.push(MenuItem::Separator);
 
@@ -382,7 +392,7 @@ impl ksni::Tray for SyncTray {
                     }),
                     ..Default::default()
                 }
-                .into(),
+                    .into(),
             );
         } else if is_active {
             items.push(
@@ -394,7 +404,7 @@ impl ksni::Tray for SyncTray {
                     }),
                     ..Default::default()
                 }
-                .into(),
+                    .into(),
             );
         } else {
             items.push(
@@ -406,7 +416,7 @@ impl ksni::Tray for SyncTray {
                     }),
                     ..Default::default()
                 }
-                .into(),
+                    .into(),
             );
         }
 
@@ -428,7 +438,7 @@ impl ksni::Tray for SyncTray {
                 }),
                 ..Default::default()
             }
-            .into(),
+                .into(),
         );
 
         let remote = self
@@ -450,7 +460,7 @@ impl ksni::Tray for SyncTray {
                 }),
                 ..Default::default()
             }
-            .into(),
+                .into(),
         );
 
         items.push(MenuItem::Separator);
@@ -469,7 +479,7 @@ impl ksni::Tray for SyncTray {
                 }),
                 ..Default::default()
             }
-            .into(),
+                .into(),
         );
 
         items.push(
@@ -481,7 +491,7 @@ impl ksni::Tray for SyncTray {
                 }),
                 ..Default::default()
             }
-            .into(),
+                .into(),
         );
 
         let p = self.log_dir.clone();
@@ -494,7 +504,7 @@ impl ksni::Tray for SyncTray {
                 }),
                 ..Default::default()
             }
-            .into(),
+                .into(),
         );
 
         items.push(
@@ -506,7 +516,7 @@ impl ksni::Tray for SyncTray {
                 }),
                 ..Default::default()
             }
-            .into(),
+                .into(),
         );
 
         items.push(
@@ -518,7 +528,7 @@ impl ksni::Tray for SyncTray {
                 }),
                 ..Default::default()
             }
-            .into(),
+                .into(),
         );
 
         items.push(MenuItem::Separator);
@@ -532,7 +542,7 @@ impl ksni::Tray for SyncTray {
                 }),
                 ..Default::default()
             }
-            .into(),
+                .into(),
         );
 
         items
@@ -585,6 +595,8 @@ fn toggle_autostart(enable: bool) {
 }
 
 // ── Thread GTK unique et persistant ──────────────────────────────────────────
+
+/// Affiche la fenêtre "À propos" de l'application via Libadwaita.
 pub fn show_about_in_app(app: &libadwaita::Application) {
     let about = libadwaita::AboutWindow::builder()
         .application_name("SyncGDrive")

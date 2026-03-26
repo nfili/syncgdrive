@@ -1,4 +1,9 @@
 //! Gestion et rendu des icônes SVG "Dossier Premium" pour le systray (Phase 7).
+//!
+//! Ce module embarque statiquement les fichiers SVG dans le binaire final
+//! (`include_bytes!`) et les rastérise à la volée en pixels ARGB32 requis
+//! par le protocole D-Bus (KSNI). Cela garantit un affichage net sur n'importe
+//! quel environnement de bureau Linux (KDE, GNOME, XFCE).
 
 use resvg::tiny_skia::{Pixmap, Transform};
 use resvg::usvg::{Options, Tree};
@@ -50,12 +55,15 @@ const ICON_HELP: &[u8] = include_bytes!("../../assets/icons/help.svg");
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum TrayIcon {
     Idle,
+    /// Démarrage avec pourcentage d'avancement.
     Starting(u8),
-    Scanning(usize), // Contient l'index de la frame (0..3)
+    /// Animation de scan. Contient l'index de la frame (0..7).
+    Scanning(usize),
     Offline,
     Error,
     Paused,
-    Sync(usize), // Contient l'index de la frame (0..3)
+    /// Animation de transfert. Contient l'index de la frame (0..7).
+    Sync(usize),
     Settings,
     Help,
 }

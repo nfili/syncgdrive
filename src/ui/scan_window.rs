@@ -1,8 +1,12 @@
-//! Fenêtre GTK4 affichant la progression du scan initial (Phase 7).
+//! Fenêtre de scan GTK4 (Mode Premium).
+//!
+//! Affiche de manière asynchrone la progression de l'analyse initiale
+//! (comparaison locale vs cloud) avant de démarrer la synchronisation réelle.
 
 use gtk4::prelude::*;
 use libadwaita::prelude::*;
 
+/// Composant visuel (Widget) responsable du dashboard d'analyse.
 #[derive(Clone)]
 pub struct ScanWindow {
     pub window: libadwaita::Window,
@@ -12,6 +16,7 @@ pub struct ScanWindow {
 }
 
 impl ScanWindow {
+    /// Construit l'arbre de widgets Libadwaita.
     pub fn new(app: &libadwaita::Application) -> Self {
         let window = libadwaita::Window::builder()
             .application(app)
@@ -19,7 +24,7 @@ impl ScanWindow {
             .default_width(540) // Fenêtre un peu plus large pour respirer
             .default_height(380)
             .modal(true)
-            .deletable(false) // On empêche la fermeture par la croix
+            .deletable(false) // On empêche la fermeture par la croix pour ne pas corrompre le statut
             .build();
 
         // ── En-tête natif GNOME/Libadwaita ──
@@ -110,6 +115,7 @@ impl ScanWindow {
         }
     }
 
+    /// Met à jour les valeurs affichées à l'écran.
     pub fn update(&self, phase_name: &str, done: usize, total: usize, current: &str) {
         self.phase_label.set_label(phase_name);
 
@@ -121,10 +127,12 @@ impl ScanWindow {
         self.path_label.set_label(&display_path);
 
         if total > 0 {
+            // Mode calculable : mise à jour de la barre de fraction
             self.progress.set_fraction(done as f64 / total as f64);
             self.progress
                 .set_text(Some(&format!("{} / {}", done, total)));
         } else {
+            // Mode indéterminé : la barre fait un va-et-vient (pulse)
             self.progress.pulse();
             self.progress
                 .set_text(Some(&format!("{} éléments analysés...", done)));
@@ -132,19 +140,20 @@ impl ScanWindow {
     }
 }
 
-/// Affiche la fenêtre de scan et écoute les mises à jour du moteur.
+/// Affiche la fenêtre de scan et écoute les mises à jour en provenance du moteur.
+///
+/// Attache un watcher `tokio::sync::watch` sur la boucle GLib `spawn_local`.
 pub fn show_scan_window_in_app(
     app: &libadwaita::Application,
     mut rx: tokio::sync::watch::Receiver<crate::engine::EngineStatus>,
 ) {
-    // 1. On crée et on affiche la fenêtre immédiatement,
-    // l'application GTK est déjà en cours d'exécution !
+    // 1. On crée et on affiche la fenêtre immédiatement
     let win = ScanWindow::new(app);
     win.window.present();
 
     let win_clone = win.clone();
 
-    // 2. On lance l'écouteur asynchrone attaché à la boucle principale de GTK
+    // 2. Écouteur asynchrone attaché à la boucle principale de GTK (GLib event loop)
     gtk4::glib::MainContext::default().spawn_local(async move {
         while rx.changed().await.is_ok() {
             let status = rx.borrow().clone();

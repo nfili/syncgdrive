@@ -1,8 +1,13 @@
+//! Fenêtre d'assistance et tutoriel de configuration.
+//!
+//! Affiche les instructions de configuration OAuth2 avec le formatage Markup
+//! (Pango) et rend les liens hypertextes cliquables vers l'extérieur.
+
 use crate::engine::EngineCommand;
 use gtk4::prelude::*;
 use libadwaita::prelude::*;
 
-// NOUVEAU : On ne crée plus l'application ici, on la reçoit du Serveur UI !
+/// Construit et affiche la fenêtre d'aide.
 pub fn show_help_in_app(
     app: &libadwaita::Application,
     cmd_tx: tokio::sync::mpsc::Sender<crate::engine::EngineCommand>,
@@ -10,7 +15,7 @@ pub fn show_help_in_app(
     let _ = cmd_tx.try_send(EngineCommand::OpenHelp);
 
     let window = libadwaita::Window::builder()
-        .application(app) // On s'accroche proprement au serveur
+        .application(app) // S'accroche proprement au serveur UI existant
         .title("Aide & Configuration")
         .default_width(600)
         .default_height(500)
@@ -67,15 +72,16 @@ Si votre jeton expire ou est révoqué, l'application passera en mode <i>Hors-Li
         .label(help_text)
         .build();
 
-    // On rend les liens cliquables pour ouvrir le navigateur par défaut
+    // OPTIMISATION DRY : On utilise l'utilitaire global pour ouvrir le navigateur.
     label.connect_activate_link(|_, uri| {
-        let _ = std::process::Command::new("xdg-open").arg(uri).spawn();
+        use crate::utils::path_display::open_external;
+        
+        open_external(uri);
         gtk4::glib::Propagation::Stop
     });
 
     clamp.set_child(Some(&label));
 
-    // CORRECTION ICI : On utilise gtk4 et on retire l'attribut .application()
     let scrolled_window = gtk4::ScrolledWindow::builder()
         .hscrollbar_policy(gtk4::PolicyType::Never)
         .child(&clamp)
@@ -90,6 +96,5 @@ Si votre jeton expire ou est révoqué, l'application passera en mode <i>Hors-Li
         gtk4::glib::Propagation::Proceed
     });
 
-    // On affiche directement la fenêtre !
     window.present();
 }

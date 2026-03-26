@@ -1,3 +1,9 @@
+//! Point d'entrée de l'interface graphique GTK4 / Libadwaita.
+//!
+//! Ce module gère la boucle principale (Main Loop) de l'interface utilisateur.
+//! Il établit un pont de communication asynchrone entre le moteur de synchronisation 
+//! (qui tourne sous Tokio) et l'interface graphique (qui tourne sous GLib/GTK).
+
 use gtk4::prelude::*;
 use tokio::sync::mpsc;
 
@@ -9,6 +15,7 @@ pub mod tray;
 
 pub use tray::spawn_tray;
 
+/// Commandes envoyées depuis le Systray ou le moteur vers le thread GTK.
 pub enum UiCommand {
     ShowHelp,
     ShowSettings,
@@ -16,6 +23,11 @@ pub enum UiCommand {
     ShowScanWindow,
 }
 
+/// Démarre le serveur UI dans un thread OS dédié.
+///
+/// Cette fonction initialise l'application Libadwaita, configure le thème sombre,
+/// et maintient l'application en vie via un `hold_guard` tant que le canal de
+/// commandes (`ui_rx`) reste ouvert.
 pub fn start_ui_server(
     cmd_tx: tokio::sync::mpsc::Sender<crate::engine::EngineCommand>,
 ) -> mpsc::UnboundedSender<UiCommand> {
