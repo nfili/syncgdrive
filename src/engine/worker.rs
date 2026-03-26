@@ -1,33 +1,32 @@
+//! Ouvrier (Worker) d'exécution pour SyncGDrive.
+//!
+//! Ce module contient la logique transactionnelle unitaire. Il est appelé par l'orchestrateur
+//! pour exécuter concrètement les opérations (Upload, Renommage, Suppression) via l'API
+//! distante, tout en maintenant le cache et la base de données SQLite à jour.
+
 use std::path::Path;
-use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 
 use anyhow::{Context, Result};
 use md5::{Digest, Md5};
-use tokio_util::sync::CancellationToken;
 use tracing::debug;
 
-use crate::config::AppConfig;
-use crate::db::{Database, FileEntry};
-use crate::engine::bandwidth::ProgressTracker;
+use crate::db::FileEntry;
 use crate::engine::scan::retry;
-use crate::engine::Task;
+use crate::engine::{EngineContext, Task};
 use crate::ignore::IgnoreMatcher;
-use crate::remote::{path_cache::PathCache, RemoteProvider};
 
-#[allow(clippy::too_many_arguments)]
+/// Point d'entrée principal pour traiter une tâche de synchronisation.
+///
+/// Intercepte la tâche en mode "simulation" (`dry_run`) pour l'afficher sans l'exécuter.
+/// Sinon, délègue le traitement à la fonction spécialisée correspondante.
 pub(crate) async fn handle(
     task: Task,
-    cfg: &AppConfig,
-    db: &Database,
-    provider: &Arc<dyn RemoteProvider>,
-    path_cache: &Arc<PathCache>,
+    ctx: &EngineContext,
     ignore: &IgnoreMatcher,
-    tracker: Arc<ProgressTracker>,
-    shutdown: &CancellationToken,
-    dry_run: bool,
 ) -> Result<()> {
-    if dry_run {
+    // ── Mode Simulation ───────────────────────────────────────────────────────
+    if ctx.dry_run {
         match &task {
             Task::SyncFile { path } => {
                 let size = tokio::fs::metadata(path).await.map(|m| m.len()).unwrap_or(0);
@@ -42,39 +41,27 @@ pub(crate) async fn handle(
         }
         return Ok(());
     }
+
+    // ── Mode Production ───────────────────────────────────────────────────────
     match task {
-        Task::SyncFile { path } => {
-            sync_file(
-                &path, cfg, db, provider, path_cache, ignore, tracker, shutdown,
-            )
-            .await
-        }
-        Task::Delete(path) => delete(&path, cfg, db, provider, path_cache, ignore, shutdown).await,
-        Task::Rename { from, to } => {
-            rename(
-                &from, &to, cfg, db, provider, path_cache, ignore, tracker, shutdown,
-            )
-            .await
-        }
+        Task::SyncFile { path } => sync_file(&path, ctx, ignore).await,
+        Task::Delete(path) => delete(&path, ctx, ignore).await,
+        Task::Rename { from, to } => rename(&from, &to, ctx, ignore).await,
     }
 }
 
 // ── Sync fichier ──────────────────────────────────────────────────────────────
-#[allow(clippy::too_many_arguments)]
+
+/// Gère le transfert (upload ou mise à jour) d'un fichier local vers le Drive.
+///
+/// Vérifie d'abord si le fichier nécessite réellement un upload via son MTime et son Hash.
+/// Gère la création des versions (re-upload sur le même ID) et vérifie l'intégrité (MD5) post-upload.
 async fn sync_file(
     path: &Path,
-    cfg: &AppConfig,
-    db: &Database,
-    provider: &Arc<dyn RemoteProvider>,
-    path_cache: &Arc<PathCache>,
+    ctx: &EngineContext,
     ignore: &IgnoreMatcher,
-    tracker: Arc<ProgressTracker>,
-    shutdown: &CancellationToken,
 ) -> Result<()> {
-    if ignore.is_ignored(path) {
-        return Ok(());
-    }
-    if !path.is_file() {
+    if ignore.is_ignored(path) || !path.is_file() {
         return Ok(());
     }
 
@@ -84,32 +71,32 @@ async fn sync_file(
         return Ok(());
     }
 
-    let primary = cfg.get_primary_pair().context("Aucun dossier")?;
+    let primary = ctx.cfg.get_primary_pair().context("Aucun dossier")?;
     let rel = rel_str(&primary.local_path, path)?;
     let mtime = mtime(path)?;
 
-    // Check rapide MTime
-    if let Some(e) = db.get(&rel)? {
-        if e.mtime == mtime && path_cache.lookup(&rel).await.is_some() {
+    // Check rapide MTime (évite le hachage inutile)
+    if let Some(e) = ctx.db.get(&rel)? {
+        if e.mtime == mtime && ctx.path_cache.lookup(&rel).await.is_some() {
             return Ok(());
         }
     }
 
-    if shutdown.is_cancelled() {
+    if ctx.shutdown.is_cancelled() {
         return Ok(());
     }
 
     let hash = match hash_file(path).await {
         Ok(h) => h,
         Err(_) if !path.is_file() => return Ok(()),
-        Err(_) if shutdown.is_cancelled() => return Ok(()),
+        Err(_) if ctx.shutdown.is_cancelled() => return Ok(()),
         Err(e) => return Err(e),
     };
 
-    // Check profond Hash
-    if let Some(e) = db.get(&rel)? {
-        if e.hash == hash && path_cache.lookup(&rel).await.is_some() {
-            db.upsert(&FileEntry {
+    // Check profond Hash (vérifie le contenu réel)
+    if let Some(e) = ctx.db.get(&rel)? {
+        if e.hash == hash && ctx.path_cache.lookup(&rel).await.is_some() {
+            ctx.db.upsert(&FileEntry {
                 path: rel.clone(),
                 hash,
                 mtime,
@@ -128,7 +115,7 @@ async fn sync_file(
     let parent_id = if parent_rel.is_empty() {
         primary.remote_folder_id.clone()
     } else {
-        path_cache
+        ctx.path_cache
             .lookup(&parent_rel)
             .await
             .map(|e| e.drive_id)
@@ -138,7 +125,7 @@ async fn sync_file(
             ))?
     };
 
-    let existing_entry = path_cache.lookup(&rel).await;
+    let existing_entry = ctx.path_cache.lookup(&rel).await;
     let mut last_attempt_id = existing_entry.map(|e| e.drive_id);
 
     let parent_dir_name = path
@@ -146,25 +133,25 @@ async fn sync_file(
         .unwrap_or_else(|| Path::new(""))
         .to_string_lossy()
         .to_string();
-    tracker.set_current_file(parent_dir_name, file_name.clone(), file_size);
+    ctx.tracker.set_current_file(parent_dir_name, file_name.clone(), file_size);
 
-    // Boucle d'Upload explicite pour gérer parfaitement last_attempt_id sans closure
+    // Boucle d'Upload avec gestion de la reprise sur erreur et vérification d'intégrité
     let mut attempt = 1;
-    let max_attempts = cfg.retry.max_attempts;
-    let backoff = cfg.retry.initial_backoff_ms;
+    let max_attempts = ctx.cfg.retry.max_attempts;
+    let backoff = ctx.cfg.retry.initial_backoff_ms;
 
     let res = loop {
-        if shutdown.is_cancelled() {
+        if ctx.shutdown.is_cancelled() {
             anyhow::bail!("Annulé");
         }
 
-        match provider
+        match ctx.provider
             .upload(
                 path,
                 &parent_id,
                 &file_name,
                 last_attempt_id.as_deref(),
-                tracker.clone(),
+                ctx.tracker.clone(),
             )
             .await
         {
@@ -202,13 +189,13 @@ async fn sync_file(
 
         tokio::select! {
             _ = tokio::time::sleep(std::time::Duration::from_millis(backoff)) => {}
-            _ = shutdown.cancelled() => anyhow::bail!("Annulé proprement pendant le retry"),
+            _ = ctx.shutdown.cancelled() => anyhow::bail!("Annulé proprement pendant le retry"),
         }
         attempt += 1;
     };
 
-    path_cache.insert(&rel, &res.drive_id, &parent_id).await;
-    db.upsert(&FileEntry {
+    ctx.path_cache.insert(&rel, &res.drive_id, &parent_id).await;
+    ctx.db.upsert(&FileEntry {
         path: rel.clone(),
         hash,
         mtime,
@@ -220,66 +207,60 @@ async fn sync_file(
 
 // ── Suppression ───────────────────────────────────────────────────────────────
 
+/// Supprime un fichier sur le cloud pour refléter la suppression locale.
 async fn delete(
     path: &Path,
-    cfg: &AppConfig,
-    db: &Database,
-    provider: &Arc<dyn RemoteProvider>,
-    path_cache: &Arc<PathCache>,
+    ctx: &EngineContext,
     ignore: &IgnoreMatcher,
-    shutdown: &CancellationToken,
 ) -> Result<()> {
     if ignore.is_ignored(path) {
         return Ok(());
     }
 
-    let primary = cfg.get_primary_pair().context("Aucun dossier")?;
+    let primary = ctx.cfg.get_primary_pair().context("Aucun dossier")?;
     let rel = match rel_str(&primary.local_path, path) {
         Ok(r) => r,
         Err(_) => return Ok(()),
     };
 
-    if let Some(entry) = path_cache.lookup(&rel).await {
-        retry(cfg, shutdown, "delete", || async {
-            provider.delete(&entry.drive_id).await
+    if let Some(entry) = ctx.path_cache.lookup(&rel).await {
+        retry(&ctx.cfg, &ctx.shutdown, "delete", || async {
+            ctx.provider.delete(&entry.drive_id).await
         })
-        .await?;
+            .await?;
 
-        path_cache.remove_cascades(&rel).await;
+        ctx.path_cache.remove_cascades(&rel).await;
     }
 
-    db.delete(&rel)?;
+    ctx.db.delete(&rel)?;
     debug!(rel, "deleted");
     Ok(())
 }
 
 // ── Renommage ─────────────────────────────────────────────────────────────────
-#[allow(clippy::too_many_arguments)]
+
+/// Déplace ou renomme un fichier sur le cloud sans le ré-uploader.
 async fn rename(
     from: &Path,
     to: &Path,
-    cfg: &AppConfig,
-    db: &Database,
-    provider: &Arc<dyn RemoteProvider>,
-    path_cache: &Arc<PathCache>,
+    ctx: &EngineContext,
     ignore: &IgnoreMatcher,
-    tracker: Arc<ProgressTracker>,
-    shutdown: &CancellationToken,
 ) -> Result<()> {
     if ignore.is_ignored(from) && ignore.is_ignored(to) {
         return Ok(());
     }
 
-    let primary = cfg.get_primary_pair().context("Aucun dossier")?;
+    let primary = ctx.cfg.get_primary_pair().context("Aucun dossier")?;
     let from_rel = rel_str(&primary.local_path, from).unwrap_or_default();
     let to_rel = rel_str(&primary.local_path, to).unwrap_or_default();
 
-    let from_entry = path_cache.lookup(&from_rel).await;
-    let from_in_db = !from_rel.is_empty() && db.get(&from_rel)?.is_some();
+    let from_entry = ctx.path_cache.lookup(&from_rel).await;
+    let from_in_db = !from_rel.is_empty() && ctx.db.get(&from_rel)?.is_some();
 
+    // Si on ne connait pas l'original, on le traite comme un nouveau fichier
     if from_entry.is_none() || !from_in_db {
         if to.is_file() && !ignore.is_ignored(to) {
-            return sync_file(to, cfg, db, provider, path_cache, ignore, tracker, shutdown).await;
+            return sync_file(to, ctx, ignore).await;
         }
         return Ok(());
     }
@@ -296,23 +277,23 @@ async fn rename(
     let new_parent_id = if new_parent_rel.is_empty() {
         primary.remote_folder_id.clone()
     } else {
-        path_cache
+        ctx.path_cache
             .lookup(&new_parent_rel)
             .await
             .context("Dossier destination introuvable")?
             .drive_id
     };
 
-    retry(cfg, shutdown, "rename", || async {
-        provider
+    retry(&ctx.cfg, &ctx.shutdown, "rename", || async {
+        ctx.provider
             .rename(&file_id, Some(&new_name), Some(&new_parent_id))
             .await
     })
-    .await?;
+        .await?;
 
-    path_cache.remove_cascades(&from_rel).await;
-    path_cache.insert(&to_rel, &file_id, &new_parent_id).await;
-    db.rename(&from_rel, &to_rel)?;
+    ctx.path_cache.remove_cascades(&from_rel).await;
+    ctx.path_cache.insert(&to_rel, &file_id, &new_parent_id).await;
+    ctx.db.rename(&from_rel, &to_rel)?;
 
     debug!(from = from_rel, to = to_rel, "renamed");
     Ok(())
@@ -320,6 +301,7 @@ async fn rename(
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
+/// Extrait le chemin relatif par rapport à la racine locale synchronisée.
 fn rel_str(root: &Path, path: &Path) -> Result<String> {
     Ok(path
         .strip_prefix(root)
@@ -328,11 +310,13 @@ fn rel_str(root: &Path, path: &Path) -> Result<String> {
         .to_string())
 }
 
+/// Récupère la date de modification d'un fichier en timestamp Unix.
 fn mtime(path: &Path) -> Result<i64> {
     let m = std::fs::metadata(path).context("stat")?;
     Ok(m.modified()?.duration_since(UNIX_EPOCH)?.as_secs() as i64)
 }
 
+/// Calcule l'empreinte MD5 d'un fichier local.
 async fn hash_file(path: &Path) -> Result<String> {
     let data = tokio::fs::read(path).await.context("read")?;
     let mut h = Md5::new();
@@ -342,13 +326,17 @@ async fn hash_file(path: &Path) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
     use super::*;
     use async_trait::async_trait;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tempfile::TempDir;
-
+    use tokio_util::sync::CancellationToken;
     use crate::config::{AppConfig, SyncPair};
-    use crate::remote::{ChangesPage, HealthStatus, RemoteIndex, UploadResult};
+    use crate::db::Database;
+    use crate::engine::bandwidth::ProgressTracker;
+    use crate::remote::{ChangesPage, HealthStatus, RemoteIndex, RemoteProvider, UploadResult};
+    use crate::remote::path_cache::PathCache;
 
     struct MockProvider {
         pub uploads: AtomicUsize,
@@ -463,24 +451,46 @@ mod tests {
     async fn sync_file_uploads_and_inserts_db() {
         let (dir, cfg, db, mock, cache, ignore, tracker, sd) = setup_test().await;
         let provider: Arc<dyn RemoteProvider> = mock.clone();
+
+        let ctx = EngineContext {
+            cfg: Arc::new(cfg), // ou cfg.clone() selon comment setup_test le retourne
+            db,
+            provider,
+            path_cache: cache,
+            tracker,
+            shutdown: sd,
+            dry_run: false,
+        };
+
         let file_path = dir.path().join("test.txt");
         tokio::fs::write(&file_path, "hello bella!").await.unwrap();
 
         let task = Task::SyncFile {
             path: file_path.clone(),
         };
-        handle(task, &cfg, &db, &provider, &cache, &ignore, tracker, &sd,false)
+        handle(task, &ctx, &ignore)
             .await
             .unwrap();
 
         assert_eq!(mock.uploads.load(Ordering::Relaxed), 1);
-        assert!(db.get("test.txt").unwrap().is_some());
+        assert!(ctx.db.get("test.txt").unwrap().is_some());
     }
 
     #[tokio::test]
     async fn sync_file_skips_unchanged() {
         let (dir, cfg, db, mock, cache, ignore, tracker, sd) = setup_test().await;
         let provider: Arc<dyn RemoteProvider> = mock.clone();
+
+        let ctx = EngineContext {
+            cfg: Arc::new(cfg), // ou cfg.clone() selon comment setup_test le retourne
+            db,
+            provider,
+            path_cache: cache,
+            tracker,
+            shutdown: sd,
+            dry_run: false,
+        };
+
         let file_path = dir.path().join("unchanged.txt");
         tokio::fs::write(&file_path, "same content").await.unwrap();
 
@@ -489,14 +499,8 @@ mod tests {
         };
         handle(
             task1,
-            &cfg,
-            &db,
-            &provider,
-            &cache,
+            &ctx,
             &ignore,
-            tracker.clone(),
-            &sd,
-            false
         )
         .await
         .unwrap();
@@ -505,7 +509,7 @@ mod tests {
         let task2 = Task::SyncFile {
             path: file_path.clone(),
         };
-        handle(task2, &cfg, &db, &provider, &cache, &ignore, tracker, &sd,false)
+        handle(task2, &ctx, &ignore)
             .await
             .unwrap();
         assert_eq!(mock.uploads.load(Ordering::Relaxed), 1);
