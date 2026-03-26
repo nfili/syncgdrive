@@ -23,54 +23,114 @@ use crate::remote::{path_cache::PathCache, HealthStatus, RemoteProvider};
 
 // ── Types publics ─────────────────────────────────────────────────────────────
 
+/// Commandes externes permettant de piloter le moteur de synchronisation.
+/// Ces événements sont généralement émis par l'interface utilisateur (systray).
 #[derive(Debug, Clone)]
 pub enum EngineCommand {
+    /// Force un scan complet immédiat, même si le délai n'est pas écoulé.
     ForceScan,
+    /// Demande l'arrêt gracieux du démon et de tous ses workers.
     Shutdown,
+    /// Applique une nouvelle configuration à chaud et déclenche un redémarrage interne.
     ApplyConfig(Arc<AppConfig>),
+    /// Suspend temporairement l'exécution des tâches de synchronisation.
     Pause,
+    /// Reprend l'exécution normale du moteur après une pause.
     Resume,
+    /// Met le moteur en pause pendant l'édition des réglages.
     OpenSettings,
+    /// Met le moteur en pause pendant la consultation de l'aide.
     OpenHelp,
 }
 
+/// Représente l'état en temps réel du moteur pour l'interface utilisateur.
 #[derive(Debug, Clone)]
 pub enum EngineStatus {
+    /// Le moteur démarre (avec un pourcentage de progression).
     Starting(u8),
+    /// Le logiciel nécessite une configuration initiale (ID manquant, etc.).
     Unconfigured(String),
+    /// Le moteur écoute les événements système (Inotify) sans activité réseau.
     Idle,
+    /// Un scan global est en cours d'exécution.
     ScanProgress {
         phase: ScanPhase,
         done: usize,
         total: usize,
         current: String,
     },
+    /// Une synchronisation (upload/download) est en cours avec statistiques de bande passante.
     SyncProgress(bandwidth::ProgressSnapshot),
-    Syncing {
-        active: usize,
-    },
+    /// Des transferts sont actifs en arrière-plan.
+    Syncing { active: usize },
+    /// Le moteur a été suspendu par l'utilisateur.
     Paused,
+    /// Une erreur critique ou réseau est survenue.
     Error(String),
+    /// Le moteur est complètement arrêté.
     Stopped,
+    /// La fenêtre des paramètres est actuellement ouverte.
     Settings,
+    /// La fenêtre d'aide est actuellement ouverte.
     Help,
 }
 
+/// Les différentes étapes d'une analyse complète du système de fichiers.
 #[derive(Debug, Clone)]
 pub enum ScanPhase {
+    /// Récupération de l'index complet depuis l'API Google Drive.
     RemoteListing,
+    /// Parcours du disque dur local.
     LocalListing,
+    /// Création de l'arborescence des dossiers manquants sur le cloud.
     Directories,
+    /// Comparaison des empreintes locales, distantes et de la base de données.
     Comparing,
 }
 
+/// Les tâches unitaires traitées de manière asynchrone par les workers.
 #[derive(Debug, Clone)]
 pub(crate) enum Task {
+    /// Synchronise (uploade ou met à jour) un fichier spécifique.
     SyncFile { path: PathBuf },
+    /// Supprime un élément distant pour refléter une suppression locale.
     Delete(PathBuf),
+    /// Renomme ou déplace un fichier distant.
     Rename { from: PathBuf, to: PathBuf },
 }
 
+// ── Contexte Global ───────────────────────────────────────────────────────────
+
+// ── Contexte Global ───────────────────────────────────────────────────────────
+
+/// Contexte partagé regroupant toutes les dépendances vitales du moteur de synchronisation.
+///
+/// L'utilisation de ce pattern (Context Object) évite l'anti-pattern "Long Parameter List"
+/// dans l'orchestration des tâches asynchrones (`scan::run`, `worker::handle`) et
+/// facilite considérablement l'injection de dépendances pour les tests unitaires.
+#[derive(Clone)]
+pub(crate) struct EngineContext {
+    /// Configuration de l'application, partagée de manière thread-safe (mise à jour à chaud possible).
+    pub cfg: Arc<AppConfig>,
+
+    /// Interface avec SQLite pour persister l'état local, l'indexation et la file d'attente hors-ligne.
+    pub db: Database,
+
+    /// Client de communication avec le stockage distant (ex: Google Drive), abstrait pour le mocking.
+    pub provider: Arc<dyn RemoteProvider>,
+
+    /// Cache en mémoire ultra-rapide pour la résolution des chemins (Path ↔ Drive ID).
+    pub path_cache: Arc<PathCache>,
+
+    /// Sonde télémétrique alimentant l'interface graphique en temps réel (bande passante, fichiers restants).
+    pub tracker: Arc<ProgressTracker>,
+
+    /// Jeton d'interruption global garantissant l'arrêt gracieux et immédiat de toutes les coroutines.
+    pub shutdown: CancellationToken,
+
+    /// Si `true`, le moteur tourne à vide : aucune écriture réseau ou locale n'est effectuée (Mode Simulation).
+    pub dry_run: bool,
+}
 // ── SyncEngine ────────────────────────────────────────────────────────────────
 
 pub struct SyncEngine {
@@ -182,19 +242,23 @@ impl SyncEngine {
 
         let _ = status_tx.send(EngineStatus::Starting(100));
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+        let ctx = EngineContext{
+            cfg: self.cfg.clone(),
+            db: db.clone(),
+            provider: provider.clone(),
+            path_cache: path_cache.clone(),
+            tracker: tracker.clone(),
+            shutdown: shutdown.clone(),
+            dry_run: self.dry_run,
+        };
         {
             let _ = status_tx.send(EngineStatus::Syncing { active: 0 });
             let scan = scan::run(
-                &self.cfg,
-                &db,
+                &ctx,
                 &ignore,
-                &provider,
-                &path_cache,
                 &task_tx,
-                &shutdown,
                 &status_tx,
-                &tracker,
-                self.dry_run,
             );
             tokio::pin!(scan);
 
@@ -327,7 +391,7 @@ impl SyncEngine {
                                     let ig = IgnoreMatcher::from_patterns(&current_primary.ignore_patterns)?;
 
                                     await_scan_interruptible!(
-                                        scan::run(&self.cfg, &db, &ig, &provider, &path_cache, &task_tx, &shutdown, &status_tx, &tracker,self.dry_run),
+                                        scan::run(&ctx,&ig, &task_tx, &status_tx),
                                         shutdown, cmd_rx, status_tx, tracker, paused, rescan_on_resume
                                     );
                                 }
@@ -396,7 +460,7 @@ impl SyncEngine {
                                 let ignore2 = IgnoreMatcher::from_patterns(&current_primary.ignore_patterns)?;
 
                                 await_scan_interruptible!(
-                                    scan::run(&self.cfg, &db, &ignore2, &provider, &path_cache, &task_tx, &shutdown, &status_tx, &tracker, self.dry_run),
+                                    scan::run(&ctx, &ignore2, &task_tx, &status_tx),
                                     shutdown, cmd_rx, status_tx, tracker, paused, rescan_on_resume
                                 );
                             }
@@ -425,7 +489,7 @@ impl SyncEngine {
                                     tracker.total_files.store(0, Ordering::Relaxed);
                                     let _ = status_tx.send(EngineStatus::Syncing { active: 0 });
                                     await_scan_interruptible!(
-                                        scan::run(&self.cfg, &db, &ignore3, &provider, &path_cache, &task_tx, &shutdown, &status_tx, &tracker,self.dry_run),
+                                        scan::run(&ctx, &ignore3, &task_tx, &status_tx),
                                         shutdown, cmd_rx, status_tx, tracker, paused, rescan_on_resume
                                     );
                                 }
@@ -476,7 +540,7 @@ impl SyncEngine {
                         let ignore_r = IgnoreMatcher::from_patterns(&current_primary.ignore_patterns)?;
 
                         tokio::select! {
-                            r = scan::run(&self.cfg, &db, &ignore_r, &provider, &path_cache, &task_tx, &shutdown, &status_tx, &tracker, self.dry_run) => {
+                            r = scan::run(&ctx, &ignore_r, &task_tx, &status_tx) => {
                                 if let Err(e) = r {
                                     if is_shutdown_err(&e) { shutdown.cancel(); break; }
                                     let _ = status_tx.send(EngineStatus::Error(e.to_string()));
@@ -562,6 +626,7 @@ pub(crate) fn is_shutdown_err(e: &anyhow::Error) -> bool {
     })
 }
 
+/// Exception légitime pour éviter le God Object
 #[allow(clippy::too_many_arguments)]
 fn spawn_debounced_dispatch(
     mut watch_rx: mpsc::Receiver<watcher::WatchEvent>,
