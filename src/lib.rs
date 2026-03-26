@@ -1,10 +1,10 @@
-//! # SyncGDrive — Synchronisation unidirectionnelle local → distant
+//! # SyncGDrive — Synchronisation unidirectionnelle local → Google Drive
 //!
-//! Daemon de synchronisation qui réplique un dossier local vers Google Drive
-//! (ou tout backend KIO : SMB, SFTP, WebDAV, FTP). L'ordinateur local est la
-//! **source de vérité** ; le distant est une sauvegarde.
+//! Daemon de synchronisation asynchrone hautement optimisé qui réplique un dossier
+//! local vers Google Drive. L'ordinateur local est la **source de vérité stricte** ;
+//! le distant est un miroir de sauvegarde.
 //!
-//! ## Architecture
+//! ## Architecture V2 (Native API REST)
 //!
 //! ```text
 //! ┌────────────────────────────────────────────────────────────┐
@@ -16,61 +16,36 @@
 //! │ watcher.rs │   settings.rs     │ rotation quotidienne 7j   │
 //! │ worker.rs  │   (GTK4/adw)      │                           │
 //! ├────────────┴───────────────────┴───────────────────────────┤
-//! │            Couche d'abstraction (trait KioOps)              │
-//! │  V1: KioClient (kioclient5)  ·  V2: API REST native        │
+//! │          Couche Réseau Google Drive (reqwest + OAuth2)     │
+//! │  API v3 REST · Upload Streaming Resumable · Quotas & 429   │
 //! ├────────────────────────────────────────────────────────────┤
 //! │  config.rs  ·  db.rs (SQLite WAL)  ·  ignore.rs (globset)  │
-//! │  notif.rs (notify-rust D-Bus)  ·  kio.rs                   │
+//! │  notif.rs (notify-rust D-Bus)  ·  auth/ (PKCE OAuth2)      │
 //! └────────────────────────────────────────────────────────────┘
 //! ```
 //!
-//! ## Modules
+//! ## Modules Principaux
 //!
 //! | Module | Rôle |
 //! |--------|------|
-//! | [`config`] | Configuration TOML (`AppConfig`), validation, chemins XDG |
-//! | [`db`] | Base de données SQLite WAL — index fichiers + cache dossiers |
-//! | [`engine`] | Moteur de synchronisation : scan, watcher inotify, workers |
-//! | [`ignore`] | Filtrage par patterns glob (exclusions) |
-//! | [`kio`] | Abstraction des opérations distantes (`trait KioOps`) |
-//! | [`notif`] | Notifications bureau D-Bus (politique de silence) |
-//! | [`ui`] | Interface systray ksni + fenêtre Settings GTK4/libadwaita *(feature `ui`)* |
+//! | [`auth`] | Moteur d'authentification OAuth2 (PKCE) et stockage sécurisé AES-GCM. |
+//! | [`config`] | Configuration TOML (`AppConfig`), validation, chemins XDG. |
+//! | [`db`] | Base de données SQLite WAL — index fichiers, cache dossiers, file hors-ligne. |
+//! | [`engine`] | Moteur de synchronisation : BFS scan, inotify watcher, workers asynchrones. |
+//! | [`ignore`] | Filtrage ultra-rapide par patterns glob (exclusions) via `globset`. |
+//! | [`migration`] | Orchestrateur de mise à jour transparente V1 → V2. |
+//! | [`remote`] | Implémentation du fournisseur cloud Google Drive (Uploads par blocs, etc.). |
+//! | [`ui`] | Interface système ksni + fenêtre Settings GTK4/libadwaita *(feature `ui`)*. |
+//! | [`utils`] | Fonctions transverses (formatage d'affichage, appels OS). |
 //!
-//! ## Feature gates
+//! ## Flux de données asynchrone
 //!
-//! | Feature | Effet |
-//! |---------|-------|
-//! | `ui` | Active GTK4, libadwaita et ksni (systray + fenêtre Settings) |
-//! | *(aucune)* | Mode headless — moteur seul, sans interface graphique |
-//!
-//! ## Flux de données
-//!
-//! 1. `AppConfig` chargé depuis `~/.config/syncgdrive/config.toml`
-//! 2. `Database` (SQLite WAL) à `~/.local/share/syncgdrive/index.db`
-//! 3. Scan : `WalkDir` local + `kioclient5 ls` BFS distant → diff avec `file_index` DB → `Task::SyncFile`
-//! 4. Watcher : événements inotify → `WatchEvent` → `Task` via channel mpsc
-//! 5. Workers : bornés par sémaphore (`max_workers`), exécutent `kioclient5 copy/rm/move`
-//! 6. Logs : rotation quotidienne à `~/.local/state/syncgdrive/logs/`, rétention 7 jours
-//!
-//! ## Exemple de configuration
-//!
-//! ```toml
-//! local_root = "/home/user/Projets"
-//! remote_root = "gdrive:/MonDrive/Backup"
-//! max_workers = 4
-//! notifications = true
-//!
-//! [retry]
-//! max_attempts = 3
-//! initial_backoff_ms = 300
-//! max_backoff_ms = 8000
-//!
-//! ignore_patterns = [
-//!     "**/target/**",
-//!     "**/.git/**",
-//!     "**/node_modules/**",
-//! ]
-//! ```
+//! 1. `AppConfig` est chargé et validé depuis `~/.config/syncgdrive/config.toml`.
+//! 2. `Database` (SQLite) est ouverte en mode WAL pour permettre les écritures concurrentes.
+//! 3. **Scan :** Analyse locale (`WalkDir`) + Analyse distante en largeur (`BFS`) → Différence → Tâches.
+//! 4. **Watcher :** Écoute les événements inotify → Filtre les bruits → Injecte dans le channel `mpsc`.
+//! 5. **Workers :** Bornés par un sémaphore, ils consomment les tâches et exécutent les requêtes REST HTTP.
+//! 6. **Résilience :** En cas de coupure, les tâches basculent dans la `offline_queue` SQLite.
 
 pub mod auth;
 pub mod config;
