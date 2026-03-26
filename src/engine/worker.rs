@@ -106,11 +106,7 @@ async fn sync_file(
     }
 
     let file_name = path.file_name().unwrap().to_string_lossy().to_string();
-    let parent_rel = path
-        .parent()
-        .and_then(|p| p.strip_prefix(&primary.local_path).ok())
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_default();
+    let parent_rel = parent_rel_str(&primary.local_path, path);
 
     let parent_id = if parent_rel.is_empty() {
         primary.remote_folder_id.clone()
@@ -268,11 +264,7 @@ async fn rename(
     let file_id = from_entry.unwrap().drive_id;
     let new_name = to.file_name().unwrap().to_string_lossy().to_string();
 
-    let new_parent_rel = to
-        .parent()
-        .and_then(|p| p.strip_prefix(&primary.local_path).ok())
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_default();
+    let new_parent_rel =parent_rel_str(&primary.local_path, to);
 
     let new_parent_id = if new_parent_rel.is_empty() {
         primary.remote_folder_id.clone()
@@ -300,6 +292,16 @@ async fn rename(
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+/// Extrait le chemin relatif du dossier parent d'un fichier.
+///
+/// Retourne une chaîne vide `""` si le fichier se trouve à la racine du dossier synchronisé.
+fn parent_rel_str(root: &Path, path: &Path) -> String {
+    path.parent()
+        .and_then(|p| p.strip_prefix(root).ok())
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default()
+}
 
 /// Extrait le chemin relatif par rapport à la racine locale synchronisée.
 fn rel_str(root: &Path, path: &Path) -> Result<String> {
@@ -375,8 +377,8 @@ mod tests {
         ) -> Result<UploadResult> {
             self.uploads.fetch_add(1, Ordering::Relaxed);
             let data = tokio::fs::read(local).await.unwrap_or_default();
-            let mut hasher = md5::Md5::new();
-            md5::Digest::update(&mut hasher, &data);
+            let mut hasher = Md5::new();
+            Digest::update(&mut hasher, &data);
             let real_hash = format!("{:x}", hasher.finalize());
 
             Ok(UploadResult {
@@ -442,7 +444,7 @@ mod tests {
             Arc::new(MockProvider::new()),
             Arc::new(PathCache::new()),
             IgnoreMatcher::from_patterns(&[]).unwrap(),
-            Arc::new(crate::engine::bandwidth::ProgressTracker::new()),
+            Arc::new(ProgressTracker::new()),
             CancellationToken::new(),
         )
     }
