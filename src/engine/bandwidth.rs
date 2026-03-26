@@ -1,35 +1,56 @@
-//! Module de suivi de progression et de limitation de bande passante.
+//! Suivi télémétrique et contrôle du débit réseau.
+//!
+//! Ce module fournit les outils nécessaires pour surveiller en temps réel la vitesse
+//! de transfert (algorithme de fenêtre glissante) et limiter la consommation
+//! de bande passante (algorithme du Token Bucket).
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-/// Instantané des compteurs pour l'UI (évite de bloquer les threads)
+/// Instantané des compteurs, prêt à être consommé par l'interface utilisateur.
+///
+/// L'utilisation de ce clone permet à l'UI de s'actualiser sans jamais bloquer
+/// les threads de synchronisation (zéro contention).
 #[derive(Debug, Clone)]
 pub struct ProgressSnapshot {
+    /// Nombre total de fichiers à traiter dans le batch actuel.
     pub total_files: usize,
+    /// Nombre de fichiers déjà traités (uploadés, supprimés ou renommés).
     pub done_files: usize,
+    /// Poids total (en octets) des fichiers à uploader.
     pub total_bytes: u64,
+    /// Volume de données (en octets) déjà envoyé sur le réseau.
     pub sent_bytes: u64,
+    /// Poids du fichier actuellement en cours de transfert.
     pub current_file_size: u64,
+    /// Nombre d'octets transférés pour le fichier actuel.
     pub current_bytes_sent: u64,
+    /// Dossier parent du fichier en cours.
     pub current_dir: String,
+    /// Nom du fichier en cours de traitement.
     pub current_name: String,
+    /// Vitesse instantanée estimée en octets par seconde (Bps).
     pub speed_bps: u64,
+    /// Temps restant estimé formaté pour l'affichage (ex: "~2 min").
     pub eta_string: String,
 }
 
+/// État interne soumis à des mutations complexes (protégé par Mutex).
 struct TrackerState {
     pub current_dir: String,
     pub current_name: String,
     pub current_file_size: u64,
     pub current_bytes_sent: u64,
+    /// Historique des transferts récents pour calculer la vitesse glissante.
     pub speed_samples: VecDeque<(Instant, u64)>,
 }
 
-/// Compteurs atomiques partagés entre les workers.
-/// Optimisé pour zéro blocage sur le chemin critique de l'upload.
+/// Sonde télémétrique centralisée pour les opérations de transfert.
+///
+/// Combine des compteurs atomiques pour les métriques simples (accès ultra-rapide
+/// depuis de multiples workers) et un Mutex pour les calculs de vitesse complexes.
 pub struct ProgressTracker {
     pub total_files: AtomicUsize,
     pub done_files: AtomicUsize,
@@ -45,6 +66,7 @@ impl Default for ProgressTracker {
 }
 
 impl ProgressTracker {
+    /// Crée un nouveau tracker vierge.
     pub fn new() -> Self {
         Self {
             total_files: AtomicUsize::new(0),
@@ -61,7 +83,7 @@ impl ProgressTracker {
         }
     }
 
-    /// Définit le fichier actuellement en cours de traitement (pour l'affichage)
+    /// Définit le fichier actuellement en cours de transfert pour l'affichage UI.
     pub fn set_current_file(&self, dir: String, name: String, size: u64) {
         let mut state = self.state.lock().unwrap();
         state.current_dir = dir;
@@ -70,7 +92,10 @@ impl ProgressTracker {
         state.current_bytes_sent = 0;
     }
 
-    /// Enregistre les octets envoyés (appelé très fréquemment par les chunks reqwest)
+    /// Enregistre une portion d'octets envoyée sur le réseau.
+    ///
+    /// Doit être appelé très fréquemment (ex: par les callbacks de `reqwest`)
+    /// pour maintenir une courbe de vitesse précise.
     pub fn record_bytes(&self, n: u64) {
         let current_total = self.sent_bytes.fetch_add(n, Ordering::Relaxed) + n;
 
@@ -80,7 +105,7 @@ impl ProgressTracker {
         let now = Instant::now();
         state.speed_samples.push_back((now, current_total));
 
-        // Nettoyage de la fenêtre glissante (on garde les 5 dernières secondes)
+        // Nettoyage de la fenêtre glissante : on ne garde que les 5 dernières secondes
         while let Some(&(ts, _)) = state.speed_samples.front() {
             if now.duration_since(ts).as_secs_f64() > 5.0 {
                 state.speed_samples.pop_front();
@@ -90,9 +115,10 @@ impl ProgressTracker {
         }
     }
 
-    // ─── LOGIQUE INTERNE (SANS VERROU - Pour éviter les deadlocks) ───
+    // ─── LOGIQUE INTERNE (SANS VERROU) ────────────────────────────────────────
 
-    fn _calculate_speed(state: &TrackerState) -> u64 {
+    /// Calcule la vitesse instantanée en fonction des échantillons conservés.
+    fn calculate_speed(state: &TrackerState) -> u64 {
         if state.speed_samples.len() < 2 {
             return 0;
         }
@@ -108,14 +134,16 @@ impl ProgressTracker {
         }
     }
 
-    fn _calculate_eta_secs(speed: u64, total: u64, sent: u64) -> Option<u64> {
+    /// Estime le temps restant en secondes (ETA).
+    fn calculate_eta_secs(speed: u64, total: u64, sent: u64) -> Option<u64> {
         if speed == 0 || sent >= total {
             return None;
         }
         Some((total - sent) / speed)
     }
 
-    fn _format_eta(eta: Option<u64>) -> String {
+    /// Formate un délai en secondes vers une chaîne lisible par l'humain.
+    fn format_eta(eta: Option<u64>) -> String {
         match eta {
             None => "⏳ En attente…".into(),
             Some(secs) if secs < 60 => format!("~{} s", secs),
@@ -124,37 +152,41 @@ impl ProgressTracker {
         }
     }
 
-    // ─── API PUBLIQUE (AVEC VERROU) ───
+    // ─── API PUBLIQUE (AVEC VERROU) ───────────────────────────────────────────
 
+    /// Retourne la vitesse de transfert actuelle en octets par seconde.
     pub fn speed_bps(&self) -> u64 {
         let state = self.state.lock().unwrap();
-        Self::_calculate_speed(&state)
+        Self::calculate_speed(&state)
     }
 
+    /// Retourne l'estimation du temps restant en secondes, si calculable.
     pub fn eta_secs(&self) -> Option<u64> {
         let state = self.state.lock().unwrap();
-        let speed = Self::_calculate_speed(&state);
+        let speed = Self::calculate_speed(&state);
         let total = self.total_bytes.load(Ordering::Relaxed);
         let sent = self.sent_bytes.load(Ordering::Relaxed);
-        Self::_calculate_eta_secs(speed, total, sent)
+        Self::calculate_eta_secs(speed, total, sent)
     }
 
+    /// Retourne l'estimation du temps restant formatée en texte.
     pub fn human_eta(&self) -> String {
         let eta = self.eta_secs();
-        Self::_format_eta(eta)
+        Self::format_eta(eta)
     }
 
+    /// Capture un instantané complet et cohérent de l'état du tracker.
     pub fn snapshot(&self) -> ProgressSnapshot {
-        // On récupère les atomiques en premier (pas de lock)
+        // Lecture des compteurs atomiques (lock-free)
         let total_files = self.total_files.load(Ordering::Relaxed);
         let done_files = self.done_files.load(Ordering::Relaxed);
         let total_bytes = self.total_bytes.load(Ordering::Relaxed);
         let sent_bytes = self.sent_bytes.load(Ordering::Relaxed);
 
-        // On prend le verrou UNIQUE pour tout le reste
+        // Verrouillage unique pour les variables corrélées
         let state = self.state.lock().unwrap();
-        let speed = Self::_calculate_speed(&state);
-        let eta = Self::_calculate_eta_secs(speed, total_bytes, sent_bytes);
+        let speed = Self::calculate_speed(&state);
+        let eta = Self::calculate_eta_secs(speed, total_bytes, sent_bytes);
 
         ProgressSnapshot {
             total_files,
@@ -166,24 +198,31 @@ impl ProgressTracker {
             current_dir: state.current_dir.clone(),
             current_name: state.current_name.clone(),
             speed_bps: speed,
-            eta_string: Self::_format_eta(eta),
+            eta_string: Self::format_eta(eta),
         }
     }
 }
 
-// ─── LIMITATION DE BANDE PASSANTE ───
+// ─── LIMITATION DE BANDE PASSANTE ─────────────────────────────────────────────
 
+/// État du seau à jetons pour le limiteur de débit.
 struct BucketState {
+    /// Nombre de jetons (octets) actuellement disponibles.
     tokens: f64,
+    /// Moment de la dernière recharge du seau.
     last_refill: Instant,
 }
 
+/// Régulateur de débit asynchrone basé sur l'algorithme "Token Bucket".
+///
+/// Permet de brider la vitesse d'upload pour ne pas saturer la connexion de l'utilisateur.
 pub struct BandwidthLimiter {
     limit_bps: u64,
     state: Mutex<BucketState>,
 }
 
 impl BandwidthLimiter {
+    /// Instancie un nouveau limiteur. Une limite de `0` désactive la restriction.
     pub fn new(limit_kbps: u64) -> Self {
         let limit_bps = limit_kbps * 1024;
         Self {
@@ -195,6 +234,10 @@ impl BandwidthLimiter {
         }
     }
 
+    /// Demande la permission d'envoyer `n` octets.
+    ///
+    /// Met la tâche asynchrone en sommeil si le débit maximum est atteint,
+    /// jusqu'à ce que suffisamment de jetons soient générés.
     pub async fn acquire(&self, n: u64) {
         if self.limit_bps == 0 {
             return;
@@ -220,7 +263,7 @@ impl BandwidthLimiter {
                     let wait_secs = needed / (self.limit_bps as f64);
                     Some(Duration::from_secs_f64(wait_secs))
                 }
-            };
+            }; // 🛡️ Le verrou du Mutex est relâché ici, AVANT le `.await` !
 
             if let Some(d) = delay {
                 tokio::time::sleep(d).await;
@@ -245,16 +288,16 @@ mod tests {
     #[test]
     fn test_progress_tracker_eta_zero_speed() {
         let tracker = ProgressTracker::new();
-        // Le tracker doit renvoyer ta chaîne par défaut quand la vitesse est de 0
+        // Le tracker doit renvoyer ta chaîne par défaut quand la vitesse est de 0.
         assert_eq!(tracker.snapshot().eta_string, "⏳ En attente…");
     }
 
     #[test]
     fn test_human_eta_format() {
-        assert_eq!(ProgressTracker::_format_eta(Some(45)), "~45 s");
-        assert_eq!(ProgressTracker::_format_eta(Some(125)), "~2 min");
-        assert_eq!(ProgressTracker::_format_eta(Some(3650)), "~1 h");
-        assert_eq!(ProgressTracker::_format_eta(None), "⏳ En attente…");
+        assert_eq!(ProgressTracker::format_eta(Some(45)), "~45 s");
+        assert_eq!(ProgressTracker::format_eta(Some(125)), "~2 min");
+        assert_eq!(ProgressTracker::format_eta(Some(3650)), "~1 h");
+        assert_eq!(ProgressTracker::format_eta(None), "⏳ En attente…");
     }
 
     #[tokio::test]
