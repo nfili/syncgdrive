@@ -1,3 +1,10 @@
+//! Orchestrateur de haut niveau pour l'authentification Google Drive.
+//!
+//! Ce module fait le pont entre le stockage sécurisé local (`EncryptedFileStorage`)
+//! et les flux réseau OAuth2 purs (`oauth2.rs`). Il gère le cycle de vie complet
+//! des identifiants : chargement, validation, rafraîchissement transparent,
+//! et reconnexion forcée en cas de révocation.
+
 use crate::auth::oauth2::{GoogleTokens, OAuthAppCredentials};
 use crate::auth::storage::{EncryptedFileStorage, TokenStorage};
 use anyhow::{Context, Result};
@@ -6,17 +13,20 @@ use oauth2::reqwest::async_http_client;
 use oauth2::{AuthUrl, ClientId, ClientSecret, RefreshToken, TokenResponse, TokenUrl};
 use serde::Deserialize;
 
+/// Structure de réponse pour récupérer les métadonnées de l'utilisateur.
 #[derive(Deserialize)]
 struct DriveAbout {
     user: DriveUser,
 }
 
+/// Détails de l'utilisateur retournés par l'API Drive.
 #[derive(Deserialize)]
 struct DriveUser {
     #[serde(rename = "emailAddress")]
     email_address: String,
 }
 
+/// Gestionnaire central de l'authentification et des sessions Google.
 pub struct GoogleAuth {
     storage: EncryptedFileStorage,
     creds: OAuthAppCredentials,
@@ -29,6 +39,11 @@ impl Default for GoogleAuth {
 }
 
 impl GoogleAuth {
+    /// Initialise le gestionnaire d'authentification.
+    ///
+    /// # Panics
+    /// Panique si la variable d'environnement `SYNCGDRIVE_CLIENT_SECRET` est absente,
+    /// car le moteur de chiffrement sous-jacent ne peut pas être instancié sans elle.
     pub fn new() -> Self {
         Self {
             // On utilise les mêmes identifiants que dans storage.rs
@@ -40,12 +55,21 @@ impl GoogleAuth {
     }
 
     /// Sauvegarde manuelle (utile après le premier login)
+    ///
+    /// Persiste les jetons fournis dans le stockage chiffré local.
     pub fn save_tokens(&self, tokens: &GoogleTokens) -> Result<()> {
         self.storage.store(tokens)
     }
 
     /// La fonction "Pro" pour le démarrage : Charge, Rafraîchit et Valide
-    /// La fonction "Pro" pour le démarrage : Charge, Rafraîchit, et Reconnecte si besoin
+    /// La fonction "Pro" pour le démarrage : Charge, Rafraîchit, et Reconnecte si besoin.
+    ///
+    /// C'est le cœur du système d'authentification :
+    /// 1. Charge les jetons depuis le disque.
+    /// 2. S'ils expirent dans plus de 5 minutes (300s), les retourne directement.
+    /// 3. Sinon, tente un rafraîchissement silencieux via l'API Google.
+    /// 4. Si le rafraîchissement échoue (jeton révoqué), supprime le cache, notifie
+    ///    l'utilisateur et lance un nouveau flux d'authentification interactif.
     pub async fn get_valid_token(&self) -> Result<String> {
         let tokens = self
             .storage
@@ -86,7 +110,7 @@ impl GoogleAuth {
                 // 1. On nettoie le fichier chiffré qui ne fonctionne plus
                 let _ = self.storage.clear();
 
-                // 2. On avertit vocalement ou visuellement (Optionnel mais recommandé pour Bella)
+                // 2. On avertit vocalement ou visuellement (Optionnel, mais recommandé pour Bella).
                 #[cfg(target_os = "linux")]
                 let _ = std::process::Command::new("notify-send")
                     .args(["-a", "SyncGDrive", "-i", "dialog-warning", "Reconnexion requise", "Votre session Google a expiré. Veuillez autoriser l'application dans votre navigateur."])
@@ -114,16 +138,20 @@ impl GoogleAuth {
                 .unwrap_or(tokens.refresh_token), // On garde l'ancien si pas de nouveau
             expires_at: chrono::Utc::now().timestamp()
                 + token_response
-                    .expires_in()
-                    .map(|d| d.as_secs())
-                    .unwrap_or(3599) as i64,
+                .expires_in()
+                .map(|d| d.as_secs())
+                .unwrap_or(3599) as i64,
             scope: tokens.scope.clone(),
         };
 
         self.save_tokens(&new_tokens)?;
         Ok(new_tokens.access_token)
     }
+
     /// Révoque l'accès côté serveur (Google) et supprime le fichier local chiffré.
+    ///
+    /// Contrairement à une simple déconnexion locale, cette méthode informe Google
+    /// que l'application ne doit plus avoir accès au compte.
     pub async fn revoke_token(&self) -> Result<()> {
         // 1. Tenter de lire le token actuel pour le révoquer côté serveur
         if let Ok(Some(tokens)) = self.storage.load() {
@@ -139,7 +167,7 @@ impl GoogleAuth {
                 .await;
 
             if let Err(e) = res {
-                // On log l'erreur mais on ne bloque pas la suppression locale (utile si on est hors-ligne)
+                // On log l'erreur, mais on ne bloque pas la suppression locale (utile si on est hors-ligne).
                 tracing::warn!("Impossible de joindre Google pour la révocation : {}", e);
             }
         }
@@ -154,6 +182,8 @@ impl GoogleAuth {
     }
 
     /// Méthode utilitaire simple pour vérifier si on a un token local (sans faire d'appel réseau)
+    ///
+    /// Utilisé principalement pour conditionner l'affichage de l'interface utilisateur.
     pub fn is_locally_connected(&self) -> bool {
         self.storage
             .load()
@@ -162,6 +192,8 @@ impl GoogleAuth {
     }
 
     /// Interroge l'API Google Drive pour récupérer l'adresse email de l'utilisateur
+    ///
+    /// Fait appel à l'endpoint `drive/v3/about` avec le champ `user`.
     pub async fn get_user_email(&self) -> Result<String> {
         let token = self.get_valid_token().await?;
         let client = reqwest::Client::new();
@@ -182,6 +214,9 @@ impl GoogleAuth {
     }
 
     /// Lit la date d'expiration du jeton depuis le fichier chiffré
+    ///
+    /// Retourne la date formatée en `YYYY-MM-DD HH:MM` ou "Inconnue" si
+    /// aucun jeton valide n'est présent localement.
     pub fn get_token_expiration_date(&self) -> String {
         if let Ok(Some(tokens)) = self.storage.load() {
             // Convertit le timestamp en DateTime
