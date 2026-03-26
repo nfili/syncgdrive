@@ -1,27 +1,36 @@
+//! Vérification de l'intégrité des données post-transfert.
+//!
+//! Ce module s'assure qu'aucun fichier n'a été corrompu pendant son transit
+//! vers Google Drive en comparant l'empreinte cryptographique (MD5) calculée
+//! localement avec celle renvoyée par l'API distante.
+
 use crate::remote::UploadResult;
 use anyhow::Result;
 use md5::{Digest, Md5};
 use std::path::Path;
 
+/// Résultat de la vérification d'intégrité cryptographique.
 #[derive(Debug, PartialEq)]
 pub enum IntegrityResult {
+    /// Le fichier distant est bit-à-bit identique au fichier local.
     Ok,
+    /// Une corruption a été détectée (les empreintes diffèrent).
     Mismatch {
         local_md5: String,
         remote_md5: String,
     },
 }
 
-/// Calcule le SHA-256 local et le compare avec celui retourné par Google Drive
+/// Calcule l'empreinte MD5 locale et la compare avec celle retournée par Google Drive.
+///
+/// L'API Google Drive utilise nativement MD5 (`md5Checksum`) pour valider
+/// l'intégrité des fichiers uploadés. C'est pourquoi ce standard est imposé ici.
 pub async fn verify_upload(
     local_path: &Path,
     upload_result: &UploadResult,
 ) -> Result<IntegrityResult> {
     let local_hash = compute_hash(local_path).await?;
 
-    // NB: Google Drive retourne souvent un MD5, mais dans notre architecture
-    // on a standardisé autour du SHA-256 (ou MD5 selon ton implémentation de GDrive).
-    // Assure-toi que upload_result.md5_checksum contient bien la même chose.
     if local_hash == upload_result.md5_checksum {
         Ok(IntegrityResult::Ok)
     } else {
@@ -32,9 +41,8 @@ pub async fn verify_upload(
     }
 }
 
+/// Calcule l'empreinte MD5 d'un fichier local de manière asynchrone.
 async fn compute_hash(path: &Path) -> Result<String> {
-    // Note: Si tu utilises MD5 côté Google Drive, il faut utiliser la crate `md-5` ici.
-    // Si Google te renvoie bien le hash de ton choix, garde sha256.
     let data = tokio::fs::read(path).await?;
     let mut h = Md5::new();
     h.update(&data);
@@ -73,7 +81,7 @@ mod tests {
             } => {
                 assert_ne!(local_md5, remote_md5, "Les hashs doivent être différents");
                 assert_eq!(remote_md5, "mauvais_hash_12345");
-                // Le local_md5 sera le vrai SHA-256 calculé de notre phrase
+                // Le local_md5 sera le vrai MD5 calculé de notre phrase
             }
             _ => panic!("Le bouclier d'intégrité n'a pas détecté la corruption !"),
         }
