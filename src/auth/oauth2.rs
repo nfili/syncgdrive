@@ -1,3 +1,13 @@
+//! Mécanique du protocole OAuth2 avec extension PKCE pour Google Drive.
+//!
+//! Ce module gère l'interaction directe avec les serveurs d'authentification Google.
+//! Il implémente un flux sécurisé adapté aux applications natives (Desktop) :
+//! 1. Génération d'une preuve cryptographique (PKCE).
+//! 2. Démarrage d'un serveur TCP local éphémère.
+//! 3. Ouverture automatique du navigateur pour le consentement utilisateur.
+//! 4. Capture et validation (CSRF) du code de retour.
+//! 5. Échange du code contre des jetons d'accès et de rafraîchissement.
+
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
@@ -11,23 +21,33 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 use url::Url;
 
-/// Tokens OAuth2 pour un compte Google.
+/// Conteneur des jetons d'accès et de rafraîchissement pour l'API Google.
+///
+/// Ces jetons sont sérialisables pour être sauvegardés de manière persistante
+/// et sécurisée (via le module `storage` chiffré en AES-256-GCM).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GoogleTokens {
+    /// Jeton à courte durée de vie (généralement 1h) envoyé dans l'en-tête `Authorization : Bearer`.
     pub access_token: String,
+    /// Jeton secret à longue durée de vie permettant d'obtenir de nouveaux `access_token` sans interaction utilisateur.
     pub refresh_token: String,
-    pub expires_at: i64, // timestamp Unix
+    /// Timestamp Unix (en secondes) indiquant le moment exact de l'expiration du jeton d'accès.
+    pub expires_at: i64,
+    /// Liste des permissions accordées séparées par des espaces (ex: `https://www.googleapis.com/auth/drive.file`).
     pub scope: String,
 }
 
-/// Résultat d'un refresh de token.
+/// Représente l'état de validité d'un jeton suite à une tentative de vérification.
 pub enum TokenStatus {
-    Valid(String),           // access_token valide
-    Refreshed(GoogleTokens), // nouveau jeu de tokens
-    Expired,                 // refresh_token invalide → re-auth nécessaire
+    /// L'`access_token` actuel est valide et prêt à être utilisé.
+    Valid(String),
+    /// Le jeton était expiré, mais a été renouvelé avec succès via le `refresh_token`.
+    Refreshed(GoogleTokens),
+    /// Le jeton de rafraîchissement est invalide ou révoqué. Une ré-authentification manuelle est requise.
+    Expired,
 }
 
-/// Identifiants de l'application OAuth2.
+/// Identifiants de l'application cliente enregistrée sur la Google Cloud Console.
 #[derive(Debug, Clone)]
 pub struct OAuthAppCredentials {
     pub client_id: String,
@@ -36,6 +56,10 @@ pub struct OAuthAppCredentials {
 }
 
 impl Default for OAuthAppCredentials {
+    /// Initialise les identifiants à partir des variables d'environnement.
+    ///
+    /// Priorise `SYNCGDRIVE_CLIENT_ID` et `SYNCGDRIVE_CLIENT_SECRET`.
+    /// L'URI de redirection pointe par défaut sur `127.0.0.1` en attente de l'assignation dynamique du port.
     fn default() -> Self {
         Self {
             // Valeurs par défaut embarquées (overridables via env vars)
@@ -43,17 +67,24 @@ impl Default for OAuthAppCredentials {
                 .unwrap_or_else(|_| "À_REMPLIR_PLUS_TARD".into()),
             client_secret: std::env::var("SYNCGDRIVE_CLIENT_SECRET")
                 .unwrap_or_else(|_| "À_REMPLIR_PLUS_TARD".into()),
-            redirect_uri: "http://127.0.0.1".into(), // Le port sera dynamique
+            redirect_uri: "http://127.0.0.1".into(), // Le port sera dynamique.
         }
     }
 }
+
 impl OAuthAppCredentials {
-    /// Construit le client OAuth2 configuré pour Google
+    /// Construit une instance configurée du client OAuth2.
+    ///
+    /// # Paramètres
+    /// * `port` - Le port local éphémère sur lequel le serveur TCP écoute. Il est 
+    ///   injecté dynamiquement dans le `redirect_uri` pour correspondre à l'attente de Google.
     pub fn build_client(&self, port: u16) -> Result<BasicClient> {
         let client_id = ClientId::new(self.client_id.clone());
         let client_secret = ClientSecret::new(self.client_secret.clone());
         let auth_url = AuthUrl::new("https://accounts.google.com/o/oauth2/v2/auth".to_string())?;
         let token_url = TokenUrl::new("https://oauth2.googleapis.com/token".to_string())?;
+
+        // Ajout dynamique du port assigné par l'OS à l'URI de retour
         let redirect_url = RedirectUrl::new(format!("http://127.0.0.1:{}", port))?;
 
         Ok(
@@ -63,7 +94,12 @@ impl OAuthAppCredentials {
     }
 }
 
-/// Lance le flux d'authentification complet via le navigateur
+/// Déclenche le flux d'authentification interactif complet via le navigateur de l'utilisateur.
+///
+/// Cette fonction gère toute la complexité du handshake :
+/// - Sécurité **PKCE** pour empêcher l'interception du code.
+/// - Détection des attaques **CSRF** via la vérification du paramètre `state`.
+/// - Démarrage d'un serveur TCP non bloquant sur un port éphémère libre.
 pub async fn authenticate(creds: &OAuthAppCredentials) -> Result<GoogleTokens> {
     // 1. Démarrer un serveur local éphémère (port 0 = assigné par l'OS)
     let listener = TcpListener::bind("127.0.0.1:0")
@@ -74,12 +110,13 @@ pub async fn authenticate(creds: &OAuthAppCredentials) -> Result<GoogleTokens> {
     let client = creds.build_client(port)?;
 
     // 2. Générer l'URL d'autorisation avec sécurité PKCE
+    // Le PKCE génère un challenge haché envoyé dans l'URL, et conserve le vérificateur secret.
     let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
     let (auth_url, csrf_token) = client
         .authorize_url(CsrfToken::new_random)
         .add_scope(Scope::new(
             "https://www.googleapis.com/auth/drive.file".to_string(),
-        )) // Scope restreint (sécurité)
+        )) // Scope restreint (sécurité : accès uniquement aux fichiers créés par l'app)
         .set_pkce_challenge(pkce_challenge)
         .url();
 
@@ -90,6 +127,7 @@ pub async fn authenticate(creds: &OAuthAppCredentials) -> Result<GoogleTokens> {
         auth_url
     );
 
+    // Automatisation de l'ouverture du navigateur par défaut sous Linux
     #[cfg(target_os = "linux")]
     let _ = std::process::Command::new("xdg-open")
         .arg(auth_url.as_str())
@@ -124,6 +162,7 @@ pub async fn authenticate(creds: &OAuthAppCredentials) -> Result<GoogleTokens> {
         .map(|(_, value)| CsrfToken::new(value.into_owned()))
         .context("State CSRF non trouvé")?;
 
+    // Protection essentielle contre le Cross-Site Request Forgery
     if state.secret() != csrf_token.secret() {
         anyhow::bail!("Attaque CSRF détectée (le paramètre state ne correspond pas)");
     }
@@ -172,7 +211,7 @@ mod tests {
             AuthUrl::new("https://accounts.google.com/o/oauth2/v2/auth".into()).unwrap(),
             Some(TokenUrl::new("https://oauth2.googleapis.com/token".into()).unwrap()),
         )
-        .set_redirect_uri(RedirectUrl::new(creds.redirect_uri).unwrap());
+            .set_redirect_uri(RedirectUrl::new(creds.redirect_uri).unwrap());
 
         let (pkce_challenge, _) = PkceCodeChallenge::new_random_sha256();
         let (auth_url, _csrf_token) = client
