@@ -1,37 +1,55 @@
+//! Moteur d'analyse (Scanner) pour SyncGDrive.
+//!
+//! Ce module est responsable de l'inventaire et de la comparaison bidirectionnelle.
+//! Il confronte l'état du disque local, l'index distant (Google Drive) et le cache
+//! SQLite interne pour générer l'ensemble des opérations requises (le "diff").
+
 use anyhow::{Context, Result};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use md5::{Digest, Md5};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 use walkdir::WalkDir;
 
 use crate::config::AppConfig;
-use crate::db::{Database, FileEntry};
-use crate::engine::bandwidth::ProgressTracker;
-use crate::engine::{EngineStatus, ScanPhase, Task};
+use crate::db::{FileEntry};
+use crate::engine::{EngineContext, EngineStatus, ScanPhase, Task};
 use crate::ignore::IgnoreMatcher;
 use crate::notif;
-use crate::remote::{path_cache::PathCache, RemoteProvider};
 
-#[allow(clippy::too_many_arguments)]
+/// Exécute l'analyse complète (scan) du système de fichiers local et distant.
+///
+/// Cette fonction asynchrone est le chef d'orchestre de la synchronisation. Elle opère en 6 phases :
+/// 1. **Remote Listing** : Récupère l'index de Google Drive.
+/// 2. **Local Listing** : Parcourt le dossier local (en ignorant les fichiers exclus).
+/// 3. **Directories** : Recrée l'arborescence des dossiers manquants sur le cloud.
+/// 4. **Comparing** : Vérifie les hashs MD5 et MTime pour déterminer ce qui doit être uploadé.
+/// 5. **Orphans DB** : Nettoie la base de données des fichiers supprimés localement.
+/// 6. **Orphans Remote** : Ordonne la suppression sur le Drive des fichiers supprimés localement.
+///
+/// Si `ctx.dry_run` est actif, les tâches ne sont pas envoyées et un bilan est imprimé.
 pub(crate) async fn run(
-    cfg: &AppConfig,
-    db: &Database,
+    ctx: &EngineContext,
     ignore: &IgnoreMatcher,
-    provider: &Arc<dyn RemoteProvider>,
-    path_cache: &Arc<PathCache>,
     task_tx: &mpsc::Sender<Task>,
-    shutdown: &CancellationToken,
     status_tx: &mpsc::UnboundedSender<EngineStatus>,
-    tracker: &Arc<ProgressTracker>,
-    dry_run: bool,
-) -> Result<()> {
+    ) -> Result<()> {
+    // ── Décomposition du contexte ────────────────────────────────────────────────
+    let cfg = ctx.cfg.clone();
+    let provider = ctx.provider.clone();
+    let db = ctx.db.clone();
+    let path_cache = ctx.path_cache.clone();
+    let shutdown = ctx.shutdown.clone();
+    let tracker = ctx.tracker.clone();
+    let dry_run = ctx.dry_run;
+
     let primary = cfg.get_primary_pair().context("Aucun dossier")?;
     info!(root = %primary.local_path.display(), "scan: start");
-    notif::scan_started(cfg);
+    notif::scan_started(&cfg);
 
     // ── Phase 0 : listing récursif du remote (BFS GDrive) ──────────────────
     let _ = status_tx.send(EngineStatus::ScanProgress {
@@ -149,7 +167,7 @@ pub(crate) async fn run(
         });
 
         if i.is_multiple_of(10) || i + 1 == total_dirs {
-            notif::scan_dirs_progress(cfg, i + 1, total_dirs);
+            notif::scan_dirs_progress(&cfg, i + 1, total_dirs);
         }
 
         if path_cache.lookup(&rel_str).await.is_some() {
@@ -174,11 +192,11 @@ pub(crate) async fn run(
                     info!("[DRY-RUN] mkdir: {}", current_rel);
                     format!("dry_run_dir_{}", current_rel.replace('/', "_"))
                 } else {
-                    let p = Arc::clone(provider);
+                    let p = Arc::clone(&provider);
                     let cur_parent_clone = current_parent.clone();
                     let part_clone = part.clone();
 
-                    retry(cfg, shutdown, "mkdir", || {
+                    retry(&cfg, &shutdown, "mkdir", || {
                         let p_inner = Arc::clone(&p);
                         let parent = cur_parent_clone.clone();
                         let pt = part_clone.clone();
@@ -293,7 +311,7 @@ pub(crate) async fn run(
         to_sync = to_sync.len(),
         skipped, skipped_remote, "scan: comparaison terminée"
     );
-    notif::scan_complete(cfg, total_dirs, to_sync.len(), skipped + skipped_remote);
+    notif::scan_complete(&cfg, total_dirs, to_sync.len(), skipped + skipped_remote);
 
     let total_to_sync_bytes: u64 = to_sync
         .iter()
@@ -329,7 +347,7 @@ pub(crate) async fn run(
         });
 
         if i % 25 == 0 || i + 1 == sync_total {
-            notif::sync_progress(cfg, i + 1, sync_total, &file_name, size);
+            notif::sync_progress(&cfg, i + 1, sync_total, &file_name, size);
         }
 
         // 🌟 SÉCURITÉ DRY-RUN : On bloque l'envoi au canal
@@ -438,6 +456,7 @@ pub(crate) async fn run(
 }
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
+/// Récupère la date de modification d'un fichier en timestamp Unix.
 fn mtime_of(path: &Path) -> i64 {
     std::fs::metadata(path)
         .and_then(|m| m.modified())
@@ -449,16 +468,20 @@ fn mtime_of(path: &Path) -> i64 {
         .unwrap_or(0)
 }
 
+/// Calcule l'empreinte MD5 d'un fichier local.
 async fn hash_of(path: &Path) -> Result<String> {
-    use sha2::{Digest, Sha256};
     let data = tokio::fs::read(path).await?;
-    let mut h = Sha256::new();
+    let mut h = Md5::new(); // 🌟 CORRECTION: Sha256 remplacé par Md5
     h.update(&data);
     Ok(format!("{:x}", h.finalize()))
 }
 
 // ── Retry avec backoff exponentiel interruptible ──────────────────────────────
 
+/// Exécute une opération asynchrone (closure) avec un mécanisme de tentatives répétées.
+///
+/// Le délai entre deux tentatives augmente exponentiellement (backoff).
+/// La boucle écoute le jeton d'interruption `shutdown` pour annuler la pause immédiatement.
 pub async fn retry<T, F, Fut>(
     cfg: &AppConfig,
     shutdown: &CancellationToken,
@@ -502,6 +525,8 @@ where
     }
 }
 
+/// Détermine si une erreur API doit couper le moteur (Fatal).
+/// Typiquement les erreurs d'authentification (jeton expiré, 403, 401).
 pub fn is_fatal_remote_err(e: &anyhow::Error) -> bool {
     e.chain().any(|c| {
         let s = c.to_string().to_lowercase();
@@ -523,6 +548,7 @@ pub fn is_fatal_remote_err(e: &anyhow::Error) -> bool {
     })
 }
 
+// Détermine si une erreur correspond spécifiquement à un dépassement de quota (Espace saturé).
 pub fn is_quota_err(e: &anyhow::Error) -> bool {
     e.chain().any(|c| {
         let s = c.to_string().to_lowercase();
