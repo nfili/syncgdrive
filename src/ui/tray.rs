@@ -32,35 +32,41 @@ pub fn get_scan_rx() -> tokio::sync::watch::Receiver<EngineStatus> {
 //  Public API
 // ══════════════════════════════════════════════════════════════════════════════
 
+pub struct TrayContext {
+    pub cmd_tx: tokio::sync::mpsc::Sender<EngineCommand>,
+    pub status_rx: tokio::sync::mpsc::UnboundedReceiver<EngineStatus>,
+    pub config: Arc<Mutex<AppConfig>>,
+    pub open_settings: bool,
+    pub shutdown:CancellationToken,
+    pub log_dir: PathBuf,
+    pub ui_tx: tokio::sync::mpsc::UnboundedSender<crate::ui::UiCommand>,
+    pub dry_run: bool,
+}
+
 /// Démarre le gestionnaire de l'icône de la zone de notification (Systray).
 pub fn spawn_tray(
-    cmd_tx: tokio::sync::mpsc::Sender<EngineCommand>,
-    mut status_rx: tokio::sync::mpsc::UnboundedReceiver<EngineStatus>,
-    config: Arc<Mutex<AppConfig>>,
-    open_settings: bool,
-    shutdown: CancellationToken,
-    log_dir: PathBuf,
-    ui_tx: tokio::sync::mpsc::UnboundedSender<crate::ui::UiCommand>,
-    dry_run: bool,
+    ctx: TrayContext
 ) -> Result<()> {
-    let sd = shutdown.clone();
+    let sd = ctx.shutdown.clone();
     let autostart = is_autostart_enabled();
 
     let scan_tx = SCAN_TX.get_or_init(|| tokio::sync::watch::channel(EngineStatus::Starting(0)).0);
 
+    let mut status_rx = ctx.status_rx;
+
     let tray = SyncTray {
         status: Arc::new(Mutex::new(EngineStatus::Starting(0))),
-        cmd_tx: cmd_tx.clone(),
-        config,
-        shutdown,
-        log_dir,
+        cmd_tx: ctx.cmd_tx.clone(),
+        config: ctx.config.clone(),
+        shutdown: ctx.shutdown.clone(),
+        log_dir: ctx.log_dir.clone(),
         last_synced: String::new(),
         autostart,
         initial_sync_notified: false,
         animation_frame: 0,
         is_animating: false,
-        ui_tx: ui_tx.clone(),
-        dry_run,
+        ui_tx: ctx.ui_tx.clone(),
+        dry_run: ctx.dry_run,
     };
 
     // CORRECTION : On clone l'accès au statut pour notre boucle d'animation
@@ -135,8 +141,8 @@ pub fn spawn_tray(
         }
     });
 
-    if open_settings {
-        let _ = ui_tx.send(crate::ui::UiCommand::ShowSettings);
+    if ctx.open_settings {
+        let _ = ctx.ui_tx.send(crate::ui::UiCommand::ShowSettings);
     }
 
     Ok(())

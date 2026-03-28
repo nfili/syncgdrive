@@ -60,6 +60,14 @@ pub struct Database {
 impl Database {
     /// Ouvre ou crée la base de données au chemin spécifié et active le mode WAL.
     pub fn open(path: &Path) -> Result<Self> {
+        // 1. S'assurer que le dossier parent existe de manière absolue
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).with_context(|| {
+                format!("Impossible de créer le dossier parent pour la base de données : {}", parent.display())
+            })?;
+        }
+
+        // 2. Ouvrir ou créer la connexion SQLite
         let conn = Connection::open(path)
             .with_context(|| format!("Impossible d'ouvrir la base SQLite à {}", path.display()))?;
 

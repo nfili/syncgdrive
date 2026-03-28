@@ -651,11 +651,13 @@ mod tests {
         std::env::set_var("XDG_CONFIG_HOME", temp_dir.to_str().unwrap());
         std::env::set_var("SYNCGDRIVE_CLIENT_SECRET", "secret_de_test_permanent_123");
 
-        let mut config = AdvancedConfig::default();
-        config.api_base = server_url.clone();
-        config.upload_base = server_url;
-        config.chunk_threshold = 5 * 1024 * 1024;
-        config.api_rate_limit_rps = 1000; // Très haut pour ne pas ralentir les tests
+        let config = AdvancedConfig {
+            api_base: server_url.clone(),
+            upload_base: server_url, // (si tu avais aussi cette ligne à modifier)
+            chunk_threshold: 5 * 1024 * 1024,
+            api_rate_limit_rps: 1000,
+            ..Default::default() // Récupère toutes les autres valeurs par défaut
+        };
 
         let auth = GoogleAuth::new();
         let dummy_tokens = GoogleTokens {

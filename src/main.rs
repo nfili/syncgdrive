@@ -9,11 +9,10 @@
 
 use anyhow::{Context, Result};
 use std::sync::atomic::{AtomicI32, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
-
 use sync_g_drive::db::Database;
 use sync_g_drive::engine::{EngineCommand, EngineStatus, SyncEngine};
 use sync_g_drive::migration;
@@ -41,7 +40,7 @@ async fn main() -> Result<()> {
     }
 
     // Auto-détection de la session OAuth2
-    let auth = sync_g_drive::auth::GoogleAuth::new();
+    let auth = Arc::new(sync_g_drive::auth::GoogleAuth::new());
     match auth.get_valid_token().await {
         Ok(msg) => info!("✅ Google Drive : {}", msg),
         Err(e) => warn!("⚠️ Mode déconnecté : {}", e),
@@ -51,10 +50,11 @@ async fn main() -> Result<()> {
 
     let config_path = sync_g_drive::config::config_path();
     let db_path_str = db_path();
+
     let db_path_buf = std::path::Path::new(&db_path_str);
 
     // L'orchestrateur de migration gère la mise à jour V1 → V2 en toute sécurité
-    let cfg = migration::run_all_migrations(&config_path)
+    let cfg = migration::run_all_migrations(db_path_buf)
         .context("Échec lors de la migration ou du chargement de la configuration")?;
 
     let is_first_run = !config_path.exists();
@@ -101,12 +101,25 @@ async fn main() -> Result<()> {
         let _ = status_tx.send(EngineStatus::Unconfigured(reason));
         tokio::spawn(sync_g_drive::engine::run_unconfigured(
             db,
+            auth.clone(),
             shutdown.clone(),
             cmd_rx,
             status_tx,
         ))
     } else {
-        tokio::spawn(SyncEngine::new(Arc::from(cfg.clone()), dry_run).run(
+        let path_cache = Arc::new(sync_g_drive::remote::path_cache::PathCache::new()); // (Adapte si PathCache::new() demande des arguments)
+        let advanced_cfg = Arc::new(cfg.advanced.clone());
+
+        // 2. On instancie le VRAI client Google Drive
+        let gdrive = Arc::new(
+            sync_g_drive::remote::gdrive::GDriveProvider::new(
+                auth.clone(),
+                path_cache,
+                advanced_cfg,
+                shutdown.clone(),
+            ).expect("Impossible d'initialiser Google Drive")
+        );
+        tokio::spawn(SyncEngine::new(Arc::from(cfg.clone()), dry_run, gdrive).run(
             db,
             shutdown.clone(),
             cmd_rx,
@@ -120,15 +133,20 @@ async fn main() -> Result<()> {
 
     #[cfg(feature = "ui")]
     {
-        sync_g_drive::ui::spawn_tray(
-            cmd_tx.clone(),
+        use sync_g_drive::ui::tray::TrayContext;
+
+        let ctx_tray = TrayContext {
+            cmd_tx: cmd_tx.clone(),
             status_rx,
-            std::sync::Arc::new(std::sync::Mutex::new(cfg)),
-            is_first_run || needs_config,
-            shutdown.clone(),
+            config: std::sync::Arc::new(std::sync::Mutex::new(cfg)),
+            open_settings: is_first_run || needs_config,
+            shutdown: shutdown.clone(),
             log_dir,
             ui_tx,
             dry_run,
+        };
+        sync_g_drive::ui::spawn_tray(
+            ctx_tray
         )?;
     }
 

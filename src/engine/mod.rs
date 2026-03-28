@@ -136,6 +136,7 @@ pub(crate) struct EngineContext {
 pub struct SyncEngine {
     pub dry_run: bool,
     cfg: Arc<AppConfig>,
+    provider: Arc<dyn RemoteProvider>,
 }
 
 macro_rules! await_scan_interruptible {
@@ -180,8 +181,8 @@ macro_rules! await_scan_interruptible {
 }
 
 impl SyncEngine {
-    pub fn new(cfg: Arc<AppConfig>, dry_run: bool) -> Self {
-        Self { dry_run,cfg }
+    pub fn new(cfg: Arc<AppConfig>, dry_run: bool, provider: Arc<dyn RemoteProvider>) -> Self {
+        Self { dry_run,cfg,provider }
     }
 
     pub async fn run(
@@ -191,26 +192,14 @@ impl SyncEngine {
         cmd_rx: mpsc::Receiver<EngineCommand>,
         status_tx: mpsc::UnboundedSender<EngineStatus>,
     ) -> Result<()> {
-        use crate::auth::GoogleAuth;
-        use crate::remote::gdrive::GDriveProvider;
-
         let _ = status_tx.send(EngineStatus::Starting(25));
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
 
-        let auth = Arc::new(GoogleAuth::new());
         let path_cache = Arc::new(PathCache::new());
-        let config_arc = Arc::new(self.cfg.advanced.clone());
-
         let _ = status_tx.send(EngineStatus::Starting(50));
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
 
-        let provider: Arc<dyn RemoteProvider> = Arc::new(GDriveProvider::new(
-            auth,
-            path_cache.clone(),
-            config_arc,
-            shutdown.clone(),
-        )?);
-
+        let provider = self.provider.clone();
         let _ = status_tx.send(EngineStatus::Starting(75));
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
 
@@ -722,6 +711,7 @@ fn spawn_debounced_dispatch(
 
 pub async fn run_unconfigured(
     db: Database,
+    auth: Arc<crate::auth::GoogleAuth>,
     shutdown: CancellationToken,
     mut cmd_rx: mpsc::Receiver<EngineCommand>,
     status_tx: mpsc::UnboundedSender<EngineStatus>,
@@ -739,7 +729,22 @@ pub async fn run_unconfigured(
                             }
                             Ok(()) => {
                                 info!(local = %primary.local_path.display(), "valid config received, starting engine");
-                                let engine = SyncEngine::new(cfg,false);
+
+                                // 1. Préparation des dépendances
+                                let path_cache = Arc::new(PathCache::new());
+                                let advanced_cfg = Arc::new(cfg.advanced.clone());
+
+                                // 2. Création du Provider concret
+                                let gdrive = Arc::new(
+                                    crate::remote::gdrive::GDriveProvider::new(
+                                        auth.clone(),
+                                        path_cache,
+                                        advanced_cfg,
+                                        shutdown.clone(),
+                                    ).expect("Impossible d'initialiser le client HTTP GDrive")
+                                );
+
+                                let engine = SyncEngine::new(cfg,false, gdrive);
                                 return engine.run(db, shutdown, cmd_rx, status_tx).await;
                             }
                         }

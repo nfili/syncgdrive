@@ -42,7 +42,7 @@ pub async fn verify_upload(
 }
 
 /// Calcule l'empreinte MD5 d'un fichier local de manière asynchrone.
-async fn compute_hash(path: &Path) -> Result<String> {
+pub async fn compute_hash(path: &Path) -> Result<String> {
     let data = tokio::fs::read(path).await?;
     let mut h = Md5::new();
     h.update(&data);

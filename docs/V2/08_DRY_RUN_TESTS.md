@@ -16,20 +16,20 @@ Ajouter un mode dry-run pour inspecter sans modifier, et écrire les tests d'int
 
 ## 3. Fichiers Impactés
 
-| Action | Fichier | Description |
-|--------|---------|-------------|
-| **Modifier** | `src/engine/mod.rs` | Flag `dry_run`, propagation aux workers |
-| **Modifier** | `src/engine/worker.rs` | Skip les opérations remote en dry-run |
-| **Modifier** | `src/engine/scan.rs` | Log des actions simulées |
-| **Modifier** | `src/remote/gdrive.rs` | Pas d'appel API en dry-run (retour mock) |
-| **Modifier** | `src/main.rs` | Lecture env `SYNCGDRIVE_DRY_RUN` |
-| **Créer** | `tests/integration/` | Tests d'intégration end-to-end |
-| **Créer** | `tests/integration/helpers.rs` | Fixtures, mock provider, temp dirs |
-| **Créer** | `tests/integration/test_scan.rs` | Test scan complet |
-| **Créer** | `tests/integration/test_watcher.rs` | Test watcher + debounce |
-| **Créer** | `tests/integration/test_offline.rs` | Test cycle offline/online |
-| **Créer** | `tests/integration/test_migration.rs` | Test migration V1→V2 |
-| **Créer** | `tests/integration/test_config.rs` | Test config V2 complète |
+| Action       | Fichier                               | Description                              |
+|--------------|---------------------------------------|------------------------------------------|
+| **Modifier** | `src/engine/mod.rs`                   | Flag `dry_run`, propagation aux workers  |
+| **Modifier** | `src/engine/worker.rs`                | Skip les opérations remote en dry-run    |
+| **Modifier** | `src/engine/scan.rs`                  | Log des actions simulées                 |
+| **Modifier** | `src/remote/gdrive.rs`                | Pas d'appel API en dry-run (retour mock) |
+| **Modifier** | `src/main.rs`                         | Lecture env `SYNCGDRIVE_DRY_RUN`         |
+| **Créer**    | `tests/integration/`                  | Tests d'intégration end-to-end           |
+| **Créer**    | `tests/integration/helpers.rs`        | Fixtures, mock provider, temp dirs       |
+| **Créer**    | `tests/integration/test_scan.rs`      | Test scan complet                        |
+| **Créer**    | `tests/integration/test_watcher.rs`   | Test watcher + debounce                  |
+| **Créer**    | `tests/integration/test_offline.rs`   | Test cycle offline/online                |
+| **Créer**    | `tests/integration/test_migration.rs` | Test migration V1→V2                     |
+| **Créer**    | `tests/integration/test_config.rs`    | Test config V2 complète                  |
 
 ---
 
@@ -48,17 +48,17 @@ syncgdrive --dry-run
 
 **Comportement** :
 
-| Opération | Mode normal | Mode dry-run |
-|-----------|-------------|-------------|
-| Scan local (WalkDir) | ✅ Exécuté | ✅ Exécuté |
-| Scan remote (API) | ✅ Exécuté | ✅ Exécuté (lecture seule) |
-| Diff (calcul des actions) | ✅ Exécuté | ✅ Exécuté |
-| Upload fichier | ✅ Exécuté | ❌ Skippé — log `info!` |
-| Mkdir remote | ✅ Exécuté | ❌ Skippé — log `info!` |
-| Delete remote | ✅ Exécuté | ❌ Skippé — log `info!` |
-| Rename remote | ✅ Exécuté | ❌ Skippé — log `info!` |
-| Update DB | ✅ Exécuté | ❌ Skippé |
-| Watcher inotify | ✅ Actif | ❌ Désactivé |
+| Opération                 | Mode normal  | Mode dry-run              |
+|---------------------------|--------------|---------------------------|
+| Scan local (WalkDir)      | ✅ Exécuté    | ✅ Exécuté                 |
+| Scan remote (API)         | ✅ Exécuté    | ✅ Exécuté (lecture seule) |
+| Diff (calcul des actions) | ✅ Exécuté    | ✅ Exécuté                 |
+| Upload fichier            | ✅ Exécuté    | ❌ Skippé — log `info!`    |
+| Mkdir remote              | ✅ Exécuté    | ❌ Skippé — log `info!`    |
+| Delete remote             | ✅ Exécuté    | ❌ Skippé — log `info!`    |
+| Rename remote             | ✅ Exécuté    | ❌ Skippé — log `info!`    |
+| Update DB                 | ✅ Exécuté    | ❌ Skippé                  |
+| Watcher inotify           | ✅ Actif      | ❌ Désactivé               |
 
 **Logs dry-run** :
 ```
@@ -147,59 +147,78 @@ pub enum MockCall {
 
 ### `test_scan.rs`
 
-| Test | Description |
-|------|-------------|
-| `test_initial_scan_uploads_all` | Dossier local avec 10 fichiers, DB vide → 10 uploads |
-| `test_rescan_skips_unchanged` | Rescan après sync → 0 uploads |
-| `test_scan_detects_new_file` | Ajouter 1 fichier → 1 upload |
-| `test_scan_detects_modified_file` | Modifier 1 fichier → 1 upload |
-| `test_scan_detects_deleted_file` | Supprimer 1 fichier local → 1 delete remote |
-| `test_scan_creates_directories` | Arborescence locale → mkdir récursifs |
-| `test_scan_ignores_patterns` | Fichier `.git/config` → ignoré |
-| `test_scan_handles_empty_dir` | Dossier vide → mkdir mais pas d'upload |
+| Test                              | Description                                          |
+|-----------------------------------|------------------------------------------------------|
+| `test_initial_scan_uploads_all`   | Dossier local avec 10 fichiers, DB vide → 10 uploads |
+| `test_rescan_skips_unchanged`     | Rescan après sync → 0 uploads                        |
+| `test_scan_detects_new_file`      | Ajouter 1 fichier → 1 upload                         |
+| `test_scan_detects_modified_file` | Modifier 1 fichier → 1 upload                        |
+| `test_scan_detects_deleted_file`  | Supprimer 1 fichier local → 1 delete remote          |
+| `test_scan_creates_directories`   | Arborescence locale → mkdir récursifs                |
+| `test_scan_ignores_patterns`      | Fichier `.git/config` → ignoré                       |
+| `test_scan_handles_empty_dir`     | Dossier vide → mkdir mais pas d'upload               |
 
 ### `test_watcher.rs`
 
-| Test | Description |
-|------|-------------|
-| `test_watcher_detects_new_file` | Créer un fichier → événement Modified → upload |
-| `test_watcher_detects_delete` | Supprimer un fichier → événement Deleted → delete remote |
-| `test_watcher_debounce` | 5 modifications rapides → 1 seul upload |
-| `test_watcher_rename_within` | Rename dans l'arbre → Renamed → rename remote |
-| `test_watcher_rename_from_outside` | Fichier arrive de dehors → Modified → upload |
+| Test                               | Description                                              |
+|------------------------------------|----------------------------------------------------------|
+| `test_watcher_detects_new_file`    | Créer un fichier → événement Modified → upload           |
+| `test_watcher_detects_delete`      | Supprimer un fichier → événement Deleted → delete remote |
+| `test_watcher_debounce`            | 5 modifications rapides → 1 seul upload                  |
+| `test_watcher_rename_within`       | Rename dans l'arbre → Renamed → rename remote            |
+| `test_watcher_rename_from_outside` | Fichier arrive de dehors → Modified → upload             |
 
 ### `test_offline.rs`
 
-| Test | Description |
-|------|-------------|
+| Test                         | Description                                             |
+|------------------------------|---------------------------------------------------------|
 | `test_offline_queues_events` | Passer offline → modifier fichier → queue contient Sync |
-| `test_online_flushes_queue` | Retour online → queue vidée → uploads exécutés |
-| `test_offline_dedup` | 3 modifs même fichier offline → 1 seul Sync au flush |
+| `test_online_flushes_queue`  | Retour online → queue vidée → uploads exécutés          |
+| `test_offline_dedup`         | 3 modifs même fichier offline → 1 seul Sync au flush    |
 
 ### `test_migration.rs`
 
-| Test | Description |
-|------|-------------|
-| `test_config_v1_migrated` | Config V1 → V2 avec 1 sync_pair |
+| Test                            | Description                              |
+|---------------------------------|------------------------------------------|
+| `test_config_v1_migrated`       | Config V1 → V2 avec 1 sync_pair          |
 | `test_config_v1_backup_created` | Fichier `.v1.bak` existe après migration |
-| `test_db_v1_migrated` | DB V1 → tables V2 ajoutées |
-| `test_db_migration_idempotent` | Double migration → pas d'erreur |
+| `test_db_v1_migrated`           | DB V1 → tables V2 ajoutées               |
+| `test_db_migration_idempotent`  | Double migration → pas d'erreur          |
 
 ### `test_config.rs`
 
-| Test | Description |
-|------|-------------|
-| `test_full_config_roundtrip` | Sérialiser → désérialiser → identique |
+| Test                             | Description                              |
+|----------------------------------|------------------------------------------|
+| `test_full_config_roundtrip`     | Sérialiser → désérialiser → identique    |
 | `test_partial_advanced_defaults` | `[advanced]` partiel → défauts appliqués |
-| `test_multi_sync_pairs` | 3 paires → toutes chargées |
-| `test_ignore_patterns_merge` | Globaux + par paire = union |
+| `test_multi_sync_pairs`          | 3 paires → toutes chargées               |
+| `test_ignore_patterns_merge`     | Globaux + par paire = union              |
+
+### `test_commands.rs`
+
+| Test                        | Description                                                                |
+|-----------------------------|----------------------------------------------------------------------------|
+| `test_command_pause_resume` | Envoyer Pause → statut Paused → envoyer Resume → retour Idle               |
+| `test_command_shutdown`     | Envoyer Shutdown → statut Stopped → fermeture propre du thread (worker)    |
+| `test_command_apply_config` | Envoyer ApplyConfig → le moteur applique la nouvelle configuration à chaud |
+| `test_command_ui_states`    | Envoyer OpenSettings / OpenHelp → statuts Settings / Help validés          |
+
+
+
+### `test_conflicts.rs`
+
+| Test                                 | Description                                                                  |
+|--------------------------------------|------------------------------------------------------------------------------|
+| `test_conflict_local_wins_on_modify` | Fichier modifié localement → Force l'Upload (écrase le cloud)                |
+| `test_conflict_local_wins_on_delete` | Fichier supprimé localement → Force le Delete (ignore l'état du cloud)       |
+| `test_conflict_local_wins_on_rename` | Fichier renommé localement → Force le Rename (ou Delete+Upload) sur le cloud |
 
 ---
 
 ## 6. Critères d'Acceptation
 
 - [ ] `SYNCGDRIVE_DRY_RUN=1` affiche toutes les actions sans exécuter
-- [ ] Le résumé dry-run est affiché à la fin (fichiers, dossiers, taille)
+- [ ] Le résumé dry-run est affiché à la fin (fichiers, dossiers, taille).
 - [ ] Aucune écriture DB ni API en dry-run
 - [ ] Le watcher est désactivé en dry-run
 - [ ] Tous les tests d'intégration passent

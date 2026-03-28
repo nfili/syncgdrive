@@ -255,23 +255,26 @@ impl AppConfig {
     /// Retourne un tuple `(Configuration, is_first_run)` où `is_first_run` vaut `true`
     /// si un nouveau fichier par défaut vient d'être créé.
     pub fn load_or_create() -> Result<(Self, bool)> {
-        let path = config_path();
+        Self::load_from_path(&config_path())
+    }
 
+    /// Fonction testable permettant d'injecter un chemin personnalisé (ex: pendant les tests d'intégration).
+    pub fn load_from_path(path: &Path) -> Result<(Self, bool)> {
         if !path.exists() {
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent)?;
             }
             let default = AppConfig::default();
-            default.save()?;
+            default.save_to_path(path)?;
             return Ok((default, true));
         }
 
-        let raw = std::fs::read_to_string(&path)?;
+        let raw = std::fs::read_to_string(path)?;
         let (mut cfg, migrated) = Self::parse_and_migrate(&raw)?;
 
         if migrated {
             // Création sécurisée d'un backup de l'ancienne version V1
-            let backup_path = path.with_extension("toml.v1.bak");
+            let backup_path = path.with_extension("v1.bak"); // Extension simplifiée
             std::fs::write(&backup_path, &raw)
                 .with_context(|| format!("Échec création backup V1: {}", backup_path.display()))?;
 
@@ -280,8 +283,8 @@ impl AppConfig {
                 backup_path
             );
 
-            // Sauvegarde du nouveau format V2 validé
-            cfg.save()?;
+            // Sauvegarde du nouveau format V2 validé au BON endroit
+            cfg.save_to_path(path)?;
         }
 
         cfg.expand_tildes();
@@ -335,12 +338,16 @@ impl AppConfig {
 
     /// Écrit la configuration actuelle sur le disque au format TOML.
     pub fn save(&self) -> Result<()> {
-        let path = config_path();
+        self.save_to_path(&config_path())
+    }
+
+    /// Fonction testable pour sauvegarder à un emplacement précis (ex: pendant les tests d'intégration).
+    pub fn save_to_path(&self, path: &Path) -> Result<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
         let toml = toml::to_string_pretty(self).context("Erreur sérialisation V2")?;
-        std::fs::write(&path, toml)?;
+        std::fs::write(path, toml)?;
         Ok(())
     }
 
