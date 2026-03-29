@@ -1,0 +1,41 @@
+# Maintainer: Nicolas Filippozzi <ton.email@example.com>
+
+pkgname=syncgdrive
+pkgver=2.0.0
+pkgrel=1
+pkgdesc="Synchronisation unidirectionnelle vers Google Drive rapide et sécurisée"
+arch=('x86_64' 'aarch64')
+url="https://github.com/nfili/syncgdrive"
+license=('MIT')
+depends=('gcc-libs' 'glibc' 'systemd-libs' 'sqlite' 'gtk4' 'libadwaita')
+optdepends=(
+    'gnome-keyring: pour le stockage sécurisé des identifiants API (GNOME/XFCE)'
+    'kwallet: pour le stockage sécurisé des identifiants API (KDE Plasma)'
+)
+makedepends=('cargo' 'make')
+source=("$pkgname-$pkgver.tar.gz::https://github.com/nfili/syncgdrive/archive/refs/tags/v${pkgver}.tar.gz")
+
+# À METTRE À JOUR À CHAQUE RELEASE
+sha256sums=('REMPLACE_CECI_PAR_LE_HASH_SHA256_DE_L_ARCHIVE')
+
+prepare() {
+  cd "$srcdir/$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+  cd "$srcdir/$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+
+  # Appelle la cible 'build' de ton Makefile
+  make build
+}
+
+package() {
+  cd "$srcdir/$pkgname-$pkgver"
+
+  # Appelle la cible 'install' de ton Makefile
+  make DESTDIR="$pkgdir" PREFIX=/usr install
+}

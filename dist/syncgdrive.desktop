@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=SyncGDrive
+Comment=Synchronisation Google Drive rapide et sécurisée
+Exec=syncgdrive
+Icon=syncgdrive
+Terminal=false
+Type=Application
+Categories=Network;FileTransfer;
+StartupNotify=false

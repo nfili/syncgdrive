@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+    <defs>
+        <linearGradient id="folderGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+            <stop offset="0%" stop-color="#42A5F5"/>
+            <stop offset="100%" stop-color="#1565C0"/>
+        </linearGradient>
+        <linearGradient id="gdriveGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+            <stop offset="0%" stop-color="#34A853"/>
+            <stop offset="50%" stop-color="#4285F4"/>
+            <stop offset="100%" stop-color="#FBBC05"/>
+        </linearGradient>
+        <filter id="dropShadow" x="-50%" y="-50%" width="200%" height="200%">
+            <feDropShadow dx="0" dy="1.5" stdDeviation="0.8" flood-color="#000000" flood-opacity="0.25"/>
+        </filter>
+    </defs>
+
+    <g transform="translate(8, 16) scale(10)">
+        <path d="M10 4H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z"
+              fill="url(#folderGrad)"
+              filter="url(#dropShadow)"
+        />
+    </g>
+    <g filter="url(#dropShadow)">
+        <ellipse cx="128" cy="146" rx="90" ry="44"
+                 fill="#ffffff" stroke="darkblue" stroke-width="2" filter="url(#dropShadow)" opacity="0.85"/>
+        <text x="128" y="170" font-family="sans-serif" font-weight="900" font-size="68" text-anchor="middle"
+              fill="url(#gdriveGrad)" filter="url(#dropShadow)" letter-spacing="-2">
+            SGD
+        </text>
+        <text x="128" y="170" font-family="sans-serif" font-weight="900" font-size="68" text-anchor="middle"
+              fill="none" stroke="#000000" filter="url(#dropShadow)" letter-spacing="-2" opacity="0.4" stroke-width="1">
+            SGD
+        </text>
+    </g>
+
+
+    <ellipse cx="75" cy="60" rx="35" ry="2" fill="#ffffff" stroke-width="2" opacity="0.19"/>
+    <ellipse cx="67" cy="132" rx="2" ry="4" fill="#ffffff" stroke-width="2" opacity="1" transform="rotate(45,67,132)"/>
+    <ellipse cx="112" cy="132" rx="2" ry="4" fill="#ffffff" stroke-width="2" opacity="1" transform="rotate(45,112,132)"/>
+    <ellipse cx="161" cy="132" rx="2" ry="4" fill="#ffffff" stroke-width="2" opacity="1" transform="rotate(45,161,132)"/>
+
+</svg>
