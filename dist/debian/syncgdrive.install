@@ -1,0 +1,7 @@
+usr/bin/syncgdrive
+usr/share/icons/hicolor/scalable/apps/syncgdrive.svg
+usr/share/applications/syncgdrive.desktop
+usr/lib/systemd/user/syncgdrive.service
+usr/lib/sysctl.d/99-syncgdrive-inotify.conf
+usr/share/doc/syncgdrive/.env.example
+usr/share/licenses/syncgdrive/LICENSE
