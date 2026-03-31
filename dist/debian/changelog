@@ -1,7 +1,0 @@
-syncgdrive (2.0.0-1) unstable; urgency=medium
-
-  * Initial release of SyncGDrive.
-  * Added systemd user service and inotify sysctl limits.
-  * Packaged modern GTK4/Libadwaita UI.
-
- -- Nicolas Filippozzi <nicolasfilippozzi@gmail.com>  Sun, 29 Mar 2026 12:47:29 +0200
