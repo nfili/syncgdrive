@@ -1,0 +1,19 @@
+#!/bin/sh
+set -e
+
+if [ "$1" = "configure" ]; then
+    # 1. Appliquer la nouvelle limite inotify immédiatement sans redémarrer
+    sysctl --system || true
+
+    # 2. Rafraîchir le menu des applications pour afficher SyncGDrive
+    if command -v update-desktop-database >/dev/null 2>&1; then
+        update-desktop-database -q || true
+    fi
+
+    # 3. Mettre à jour le cache des icônes pour le logo SVG
+    if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+        gtk-update-icon-cache -f -t /usr/share/icons/hicolor || true
+    fi
+fi
+
+exit 0

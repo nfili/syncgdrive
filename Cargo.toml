@@ -2,6 +2,8 @@
 name = "SyncGDrive"
 version = "2.0.0"
 edition = "2021"
+description = "Synchronisation native et unidirectionnelle d'un dossier local vers Google Drive."
+
 
 [[bin]]
 name = "syncgdrive"
@@ -82,12 +84,14 @@ maintainer = "Nicolas Filippozzi <ton.email@filippozzi.fr>"
 copyright = "2026, Nicolas Filippozzi"
 license-file = ["LICENSE", "4"]
 depends = "libc6, libgcc-s1, libgtk-4-1, libadwaita-1-0"
+recommends = "xdg-utils"
 section = "utility"
 priority = "optional"
-description = "Synchronisation native et unidirectionnelle d'un dossier local vers Google Drive."
+revision = "1"
 extended-description = """\
 Synchronisation native et unidirectionnelle d'un dossier local vers Google Drive.
 L'ordinateur local est la source de vérité — le Drive distant sert de sauvegarde absolue."""
+maintainer-scripts = "dist/debian/"
 
 assets = [
     ["target/release/syncgdrive", "usr/bin/syncgdrive", "755"],
