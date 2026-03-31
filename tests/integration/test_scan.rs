@@ -28,7 +28,7 @@ async fn test_initial_scan_uploads_all() {
     // ── 2. ACT (Action) ───────────────────────────────────────────────────────
 
     let mock = Arc::new(env.mock_provider.clone());
-    let engine = SyncEngine::new(Arc::new(env.config.clone()), false,mock);
+    let engine = SyncEngine::new(Arc::new(env.config.clone()), false, mock);
 
     let (cmd_tx, cmd_rx) = mpsc::channel::<EngineCommand>(10);
     let (status_tx, _) = mpsc::unbounded_channel::<EngineStatus>();
@@ -38,7 +38,9 @@ async fn test_initial_scan_uploads_all() {
     let engine_handle = tokio::spawn(async move {
         // Supposons que tu aies adapté `run` pour accepter le provider,
         // ou que tu testes directement la fonction `scan_and_sync`
-        engine.run(env.db, shutdown.clone(), cmd_rx, status_tx).await
+        engine
+            .run(env.db, shutdown.clone(), cmd_rx, status_tx)
+            .await
     });
 
     // On force un scan immédiat via le channel de commandes
@@ -51,9 +53,13 @@ async fn test_initial_scan_uploads_all() {
             }
             tokio::time::sleep(Duration::from_millis(50)).await; // Pause de 50ms
         }
-    }).await;
+    })
+    .await;
 
-    assert!(wait_result.is_ok(), "Timeout : le moteur n'a pas atteint les 4 opérations réseau");
+    assert!(
+        wait_result.is_ok(),
+        "Timeout : le moteur n'a pas atteint les 4 opérations réseau"
+    );
 
     // On demande au moteur de s'arrêter proprement
     let _ = cmd_tx.send(EngineCommand::Shutdown).await;
@@ -62,7 +68,11 @@ async fn test_initial_scan_uploads_all() {
     // ── 3. ASSERT (Vérification) ──────────────────────────────────────────────
     let calls = env.mock_provider.get_calls();
     // On s'attend à 4 appels réseaux : 1 ListRemote, 1 Mkdir et 2 Uploads
-    assert_eq!(calls.len(), 4, "Il devrait y avoir exactement 4 opérations réseau");
+    assert_eq!(
+        calls.len(),
+        4,
+        "Il devrait y avoir exactement 4 opérations réseau"
+    );
 
     let mut list_count = 0;
     let mut mkdir_count = 0;
@@ -95,7 +105,10 @@ async fn test_initial_scan_uploads_all() {
 #[tokio::test]
 async fn test_rescan_skips_unchanged() {
     let env = TestEnv::setup();
-    let primary_pair = env.config.get_primary_pair().expect("Aucun dossier configuré");
+    let primary_pair = env
+        .config
+        .get_primary_pair()
+        .expect("Aucun dossier configuré");
     let sync_dir = &primary_pair.local_path;
     fs::create_dir_all(sync_dir).unwrap();
 
@@ -111,7 +124,9 @@ async fn test_rescan_skips_unchanged() {
     let shutdown = CancellationToken::new();
 
     let engine_handle = tokio::spawn(async move {
-        engine.run(env.db, shutdown.clone(), cmd_rx, status_tx).await
+        engine
+            .run(env.db, shutdown.clone(), cmd_rx, status_tx)
+            .await
     });
 
     // 2. PREMIER SCAN : Le fichier doit être uploadé
@@ -119,12 +134,18 @@ async fn test_rescan_skips_unchanged() {
 
     let wait_initial = tokio::time::timeout(Duration::from_secs(3), async {
         loop {
-            if env.mock_provider.get_calls().iter().any(|c| matches!(c, MockCall::Upload { .. })) {
+            if env
+                .mock_provider
+                .get_calls()
+                .iter()
+                .any(|c| matches!(c, MockCall::Upload { .. }))
+            {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-    }).await;
+    })
+    .await;
     assert!(wait_initial.is_ok(), "Le premier scan a échoué");
 
     // 3. On nettoie l'historique du Mock pour la deuxième phase
@@ -138,9 +159,15 @@ async fn test_rescan_skips_unchanged() {
 
     // 5. VÉRIFICATION : Le moteur a le droit de faire un ListRemote, mais AUCUN Upload !
     let calls_after_rescan = env.mock_provider.get_calls();
-    let upload_count = calls_after_rescan.iter().filter(|c| matches!(c, MockCall::Upload { .. })).count();
+    let upload_count = calls_after_rescan
+        .iter()
+        .filter(|c| matches!(c, MockCall::Upload { .. }))
+        .count();
 
-    assert_eq!(upload_count, 0, "Le moteur a ré-uploadé un fichier qui n'avait pas changé !");
+    assert_eq!(
+        upload_count, 0,
+        "Le moteur a ré-uploadé un fichier qui n'avait pas changé !"
+    );
 
     // Nettoyage
     let _ = cmd_tx.send(EngineCommand::Shutdown).await;
@@ -156,7 +183,10 @@ async fn test_scan_ignores_patterns() {
         pair.ignore_patterns.push("*.tmp".to_string());
     }
 
-    let primary_pair = env.config.get_primary_pair().expect("Aucun dossier configuré");
+    let primary_pair = env
+        .config
+        .get_primary_pair()
+        .expect("Aucun dossier configuré");
     let sync_dir = &primary_pair.local_path;
     fs::create_dir_all(sync_dir).unwrap();
 
@@ -171,11 +201,13 @@ async fn test_scan_ignores_patterns() {
     let engine = SyncEngine::new(Arc::new(env.config.clone()), false, mock);
 
     let (cmd_tx, cmd_rx) = mpsc::channel::<EngineCommand>(10);
-    let (status_tx,_) = mpsc::unbounded_channel();
+    let (status_tx, _) = mpsc::unbounded_channel();
     let shutdown = CancellationToken::new();
 
     let engine_handle = tokio::spawn(async move {
-        engine.run(env.db, shutdown.clone(), cmd_rx, status_tx).await
+        engine
+            .run(env.db, shutdown.clone(), cmd_rx, status_tx)
+            .await
     });
 
     // 3. On lance le scan
@@ -184,12 +216,18 @@ async fn test_scan_ignores_patterns() {
     // 4. On attend de voir l'upload du fichier valide
     let wait_upload = tokio::time::timeout(Duration::from_secs(3), async {
         loop {
-            if env.mock_provider.get_calls().iter().any(|c| matches!(c, MockCall::Upload { .. })) {
+            if env
+                .mock_provider
+                .get_calls()
+                .iter()
+                .any(|c| matches!(c, MockCall::Upload { .. }))
+            {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-    }).await;
+    })
+    .await;
     assert!(wait_upload.is_ok(), "Le fichier valide n'a pas été uploadé");
 
     // 5. VÉRIFICATION STRICTE
@@ -214,7 +252,10 @@ async fn test_scan_ignores_patterns() {
 #[tokio::test]
 async fn test_scan_detects_new_file() {
     let env = TestEnv::setup();
-    let primary_pair = env.config.get_primary_pair().expect("Aucun dossier configuré");
+    let primary_pair = env
+        .config
+        .get_primary_pair()
+        .expect("Aucun dossier configuré");
     let sync_dir = &primary_pair.local_path;
     fs::create_dir_all(sync_dir).unwrap();
 
@@ -225,23 +266,31 @@ async fn test_scan_detects_new_file() {
     let mock = Arc::new(env.mock_provider.clone());
     let engine = SyncEngine::new(Arc::new(env.config.clone()), false, mock);
     let (cmd_tx, cmd_rx) = mpsc::channel::<EngineCommand>(10);
-    let (status_tx,_) = mpsc::unbounded_channel();
+    let (status_tx, _) = mpsc::unbounded_channel();
     let shutdown = CancellationToken::new();
 
     let engine_handle = tokio::spawn(async move {
-        engine.run(env.db, shutdown.clone(), cmd_rx, status_tx).await
+        engine
+            .run(env.db, shutdown.clone(), cmd_rx, status_tx)
+            .await
     });
 
     // 2. Premier scan
     let _ = cmd_tx.send(EngineCommand::ForceScan).await;
     let _ = tokio::time::timeout(Duration::from_secs(3), async {
         loop {
-            if env.mock_provider.get_calls().iter().any(|c| matches!(c, MockCall::Upload { .. })) {
+            if env
+                .mock_provider
+                .get_calls()
+                .iter()
+                .any(|c| matches!(c, MockCall::Upload { .. }))
+            {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-    }).await;
+    })
+    .await;
 
     // 3. On nettoie l'historique et on ajoute un NOUVEAU fichier
     env.mock_provider.clear_calls();
@@ -262,17 +311,22 @@ async fn test_scan_detects_new_file() {
         }
     }).await;
 
-    assert!(wait_new.is_ok(), "Le nouveau fichier n'a pas été détecté lors du second scan");
+    assert!(
+        wait_new.is_ok(),
+        "Le nouveau fichier n'a pas été détecté lors du second scan"
+    );
 
     let _ = cmd_tx.send(EngineCommand::Shutdown).await;
     let _ = engine_handle.await;
 }
 
-
 #[tokio::test]
 async fn test_scan_detects_modified_file() {
     let env = TestEnv::setup();
-    let primary_pair = env.config.get_primary_pair().expect("Aucun dossier configuré");
+    let primary_pair = env
+        .config
+        .get_primary_pair()
+        .expect("Aucun dossier configuré");
     let sync_dir = &primary_pair.local_path;
     fs::create_dir_all(sync_dir).unwrap();
 
@@ -286,19 +340,27 @@ async fn test_scan_detects_modified_file() {
     let shutdown = CancellationToken::new();
 
     let engine_handle = tokio::spawn(async move {
-        engine.run(env.db, shutdown.clone(), cmd_rx, status_tx).await
+        engine
+            .run(env.db, shutdown.clone(), cmd_rx, status_tx)
+            .await
     });
 
     // 1. Upload initial
     let _ = cmd_tx.send(EngineCommand::ForceScan).await;
     let wait_init = tokio::time::timeout(Duration::from_secs(3), async {
         loop {
-            if env.mock_provider.get_calls().iter().any(|c| matches!(c, MockCall::Upload { .. })) {
+            if env
+                .mock_provider
+                .get_calls()
+                .iter()
+                .any(|c| matches!(c, MockCall::Upload { .. }))
+            {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-    }).await;
+    })
+    .await;
     assert!(wait_init.is_ok(), "L'upload initial a échoué");
 
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -320,9 +382,13 @@ async fn test_scan_detects_modified_file() {
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-    }).await;
+    })
+    .await;
 
-    assert!(wait_mod.is_ok(), "La modification du fichier n'a pas déclenché de nouvel upload");
+    assert!(
+        wait_mod.is_ok(),
+        "La modification du fichier n'a pas déclenché de nouvel upload"
+    );
 
     let _ = cmd_tx.send(EngineCommand::Shutdown).await;
     let _ = engine_handle.await;
@@ -331,7 +397,10 @@ async fn test_scan_detects_modified_file() {
 #[tokio::test]
 async fn test_scan_detects_deleted_file() {
     let env = TestEnv::setup();
-    let primary_pair = env.config.get_primary_pair().expect("Aucun dossier configuré");
+    let primary_pair = env
+        .config
+        .get_primary_pair()
+        .expect("Aucun dossier configuré");
     let sync_dir = &primary_pair.local_path;
     fs::create_dir_all(sync_dir).unwrap();
 
@@ -341,23 +410,31 @@ async fn test_scan_detects_deleted_file() {
     let mock = Arc::new(env.mock_provider.clone());
     let engine = SyncEngine::new(Arc::new(env.config.clone()), false, mock);
     let (cmd_tx, cmd_rx) = mpsc::channel::<EngineCommand>(10);
-    let (status_tx,_) = mpsc::unbounded_channel();
+    let (status_tx, _) = mpsc::unbounded_channel();
     let shutdown = CancellationToken::new();
 
     let engine_handle = tokio::spawn(async move {
-        engine.run(env.db, shutdown.clone(), cmd_rx, status_tx).await
+        engine
+            .run(env.db, shutdown.clone(), cmd_rx, status_tx)
+            .await
     });
 
     // 1. Upload initial pour que le fichier existe côté cloud (dans la mémoire du Mock)
     let _ = cmd_tx.send(EngineCommand::ForceScan).await;
     let _ = tokio::time::timeout(Duration::from_secs(3), async {
         loop {
-            if env.mock_provider.get_calls().iter().any(|c| matches!(c, MockCall::Upload { .. })) {
+            if env
+                .mock_provider
+                .get_calls()
+                .iter()
+                .any(|c| matches!(c, MockCall::Upload { .. }))
+            {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-    }).await;
+    })
+    .await;
 
     env.mock_provider.clear_calls();
 
@@ -376,9 +453,13 @@ async fn test_scan_detects_deleted_file() {
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-    }).await;
+    })
+    .await;
 
-    assert!(wait_del.is_ok(), "La suppression locale n'a pas été répercutée sur le cloud");
+    assert!(
+        wait_del.is_ok(),
+        "La suppression locale n'a pas été répercutée sur le cloud"
+    );
 
     let _ = cmd_tx.send(EngineCommand::Shutdown).await;
     let _ = engine_handle.await;
@@ -387,7 +468,10 @@ async fn test_scan_detects_deleted_file() {
 #[tokio::test]
 async fn test_scan_creates_directories() {
     let env = TestEnv::setup();
-    let primary_pair = env.config.get_primary_pair().expect("Aucun dossier configuré");
+    let primary_pair = env
+        .config
+        .get_primary_pair()
+        .expect("Aucun dossier configuré");
     let sync_dir = &primary_pair.local_path;
     fs::create_dir_all(sync_dir).unwrap();
 
@@ -404,7 +488,9 @@ async fn test_scan_creates_directories() {
     let shutdown = CancellationToken::new();
 
     let engine_handle = tokio::spawn(async move {
-        engine.run(env.db, shutdown.clone(), cmd_rx, status_tx).await
+        engine
+            .run(env.db, shutdown.clone(), cmd_rx, status_tx)
+            .await
     });
 
     // 2. Scan
@@ -413,20 +499,35 @@ async fn test_scan_creates_directories() {
     // 3. On attend l'upload final du fichier (ce qui prouve que l'arborescence a été traitée).
     let wait_upload = tokio::time::timeout(Duration::from_secs(3), async {
         loop {
-            if env.mock_provider.get_calls().iter().any(|c| matches!(c, MockCall::Upload { .. })) {
+            if env
+                .mock_provider
+                .get_calls()
+                .iter()
+                .any(|c| matches!(c, MockCall::Upload { .. }))
+            {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-    }).await;
-    assert!(wait_upload.is_ok(), "Le fichier dans l'arborescence n'a pas été uploadé");
+    })
+    .await;
+    assert!(
+        wait_upload.is_ok(),
+        "Le fichier dans l'arborescence n'a pas été uploadé"
+    );
 
     // 4. Vérification stricte des Mkdir
     let calls = env.mock_provider.get_calls();
-    let mkdir_count = calls.iter().filter(|c| matches!(c, MockCall::Mkdir { .. })).count();
+    let mkdir_count = calls
+        .iter()
+        .filter(|c| matches!(c, MockCall::Mkdir { .. }))
+        .count();
 
     // Le moteur doit au moins créer "parent", "enfant" et "petit_enfant".
-    assert!(mkdir_count >= 3, "Le moteur n'a pas créé tous les dossiers récursifs de l'arborescence");
+    assert!(
+        mkdir_count >= 3,
+        "Le moteur n'a pas créé tous les dossiers récursifs de l'arborescence"
+    );
 
     let _ = cmd_tx.send(EngineCommand::Shutdown).await;
     let _ = engine_handle.await;
@@ -435,7 +536,10 @@ async fn test_scan_creates_directories() {
 #[tokio::test]
 async fn test_scan_handles_empty_dir() {
     let env = TestEnv::setup();
-    let primary_pair = env.config.get_primary_pair().expect("Aucun dossier configuré");
+    let primary_pair = env
+        .config
+        .get_primary_pair()
+        .expect("Aucun dossier configuré");
     let sync_dir = &primary_pair.local_path;
     fs::create_dir_all(sync_dir).unwrap();
 
@@ -450,7 +554,9 @@ async fn test_scan_handles_empty_dir() {
     let shutdown = CancellationToken::new();
 
     let engine_handle = tokio::spawn(async move {
-        engine.run(env.db, shutdown.clone(), cmd_rx, status_tx).await
+        engine
+            .run(env.db, shutdown.clone(), cmd_rx, status_tx)
+            .await
     });
 
     // 2. Scan
@@ -460,18 +566,31 @@ async fn test_scan_handles_empty_dir() {
     let wait_mkdir = tokio::time::timeout(Duration::from_secs(3), async {
         loop {
             let calls = env.mock_provider.get_calls();
-            if calls.iter().any(|c| matches!(c, MockCall::Mkdir { name, .. } if name == "dossier_fantome")) {
+            if calls
+                .iter()
+                .any(|c| matches!(c, MockCall::Mkdir { name, .. } if name == "dossier_fantome"))
+            {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-    }).await;
-    assert!(wait_mkdir.is_ok(), "Le dossier vide n'a pas été créé côté cloud");
+    })
+    .await;
+    assert!(
+        wait_mkdir.is_ok(),
+        "Le dossier vide n'a pas été créé côté cloud"
+    );
 
     // 4. On s'assure qu'AUCUN fichier n'a été uploadé accidentellement
     let calls = env.mock_provider.get_calls();
-    let upload_count = calls.iter().filter(|c| matches!(c, MockCall::Upload { .. })).count();
-    assert_eq!(upload_count, 0, "Un upload inattendu a eu lieu pour un dossier vide");
+    let upload_count = calls
+        .iter()
+        .filter(|c| matches!(c, MockCall::Upload { .. }))
+        .count();
+    assert_eq!(
+        upload_count, 0,
+        "Un upload inattendu a eu lieu pour un dossier vide"
+    );
 
     let _ = cmd_tx.send(EngineCommand::Shutdown).await;
     let _ = engine_handle.await;

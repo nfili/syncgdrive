@@ -11,7 +11,10 @@ async fn test_dry_run_prevents_all_mutations() {
     let env = TestEnv::setup();
 
     // 1. On récupère le dossier surveillé dynamiquement
-    let primary_pair = env.config.get_primary_pair().expect("Aucun dossier configuré");
+    let primary_pair = env
+        .config
+        .get_primary_pair()
+        .expect("Aucun dossier configuré");
     let sync_dir = &primary_pair.local_path;
     std::fs::create_dir_all(sync_dir).unwrap();
 
@@ -29,7 +32,9 @@ async fn test_dry_run_prevents_all_mutations() {
     let shutdown = CancellationToken::new();
 
     let engine_handle = tokio::spawn(async move {
-        engine.run(env.db, shutdown.clone(), cmd_rx, status_tx).await
+        engine
+            .run(env.db, shutdown.clone(), cmd_rx, status_tx)
+            .await
     });
 
     // 3. On force le scan
@@ -43,16 +48,29 @@ async fn test_dry_run_prevents_all_mutations() {
     let calls = env.mock_provider.get_calls();
 
     // Le moteur a le droit de lire le cloud (ListRemote) ou de vérifier la santé (CheckHealth)
-    let has_read = calls.iter().any(|c| matches!(c, MockCall::ListRemote { .. }));
-    assert!(has_read, "Le moteur aurait dû au moins lister le contenu distant pour calculer le diff");
+    let has_read = calls
+        .iter()
+        .any(|c| matches!(c, MockCall::ListRemote { .. }));
+    assert!(
+        has_read,
+        "Le moteur aurait dû au moins lister le contenu distant pour calculer le diff"
+    );
 
     // Mais il a interdiction formelle d'écrire !
-    let has_writes = calls.iter().any(|c| matches!(
-        c,
-        MockCall::Upload { .. } | MockCall::Mkdir { .. } | MockCall::Delete { .. } | MockCall::Rename { .. }
-    ));
+    let has_writes = calls.iter().any(|c| {
+        matches!(
+            c,
+            MockCall::Upload { .. }
+                | MockCall::Mkdir { .. }
+                | MockCall::Delete { .. }
+                | MockCall::Rename { .. }
+        )
+    });
 
-    assert!(!has_writes, "DANGER : Le moteur a tenté une opération d'écriture réseau en mode DRY RUN !");
+    assert!(
+        !has_writes,
+        "DANGER : Le moteur a tenté une opération d'écriture réseau en mode DRY RUN !"
+    );
 
     // Nettoyage final
     let _ = cmd_tx.send(EngineCommand::Shutdown).await;

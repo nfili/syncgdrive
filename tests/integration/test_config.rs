@@ -26,8 +26,8 @@ fn test_full_config_roundtrip() {
     let toml_str = toml::to_string(&original).expect("Échec de la sérialisation TOML");
 
     // 3. Action : On recrée un objet à partir de cette chaîne
-    let (deserialized, _) = AppConfig::parse_and_migrate(&toml_str)
-        .expect("Échec de la désérialisation TOML");
+    let (deserialized, _) =
+        AppConfig::parse_and_migrate(&toml_str).expect("Échec de la désérialisation TOML");
 
     // 4. Vérification : Les données doivent être strictement identiques
     assert_eq!(
@@ -70,7 +70,8 @@ fn test_partial_advanced_defaults() {
         "La valeur spécifiée par l'utilisateur a été ignorée"
     );
     assert_eq!(
-        config.max_workers, 4, // 4 est ta valeur par défaut dans config.rs
+        config.max_workers,
+        4, // 4 est ta valeur par défaut dans config.rs
         "Les valeurs non spécifiées doivent prendre leur valeur par défaut"
     );
 }
@@ -98,15 +99,17 @@ fn test_multi_sync_pairs() {
 
     let (config, _) = AppConfig::parse_and_migrate(toml).unwrap();
 
-    assert_eq!(config.sync_pairs.len(), 3, "Le parseur n'a pas détecté les 3 dossiers");
+    assert_eq!(
+        config.sync_pairs.len(),
+        3,
+        "Le parseur n'a pas détecté les 3 dossiers"
+    );
     assert_eq!(config.sync_pairs[0].remote_folder_id, "ID_1");
     assert_eq!(config.sync_pairs[1].remote_folder_id, "ID_2");
     assert_eq!(config.sync_pairs[2].remote_folder_id, "ID_3");
 }
 
 // ── 4. FUSION DES RÈGLES D'EXCLUSION (IGNORE PATTERNS MERGE) ────────────────
-
-
 
 #[test]
 fn test_ignore_patterns_parsed() {
@@ -121,7 +124,11 @@ fn test_ignore_patterns_parsed() {
     let (config, _) = AppConfig::parse_and_migrate(toml).unwrap();
     let pair = config.sync_pairs.first().unwrap();
 
-    assert_eq!(pair.ignore_patterns.len(), 2, "Les patterns n'ont pas été lus correctement");
+    assert_eq!(
+        pair.ignore_patterns.len(),
+        2,
+        "Les patterns n'ont pas été lus correctement"
+    );
     assert!(pair.ignore_patterns.contains(&"*.tmp".to_string()));
     assert!(pair.ignore_patterns.contains(&".git/".to_string()));
 }

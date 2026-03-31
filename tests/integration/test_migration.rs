@@ -1,6 +1,6 @@
+use rusqlite::Connection;
 use std::fs;
 use std::path::PathBuf;
-use rusqlite::Connection;
 use tempfile::tempdir;
 
 use sync_g_drive::config::AppConfig;
@@ -21,8 +21,15 @@ remote_root = "DRIVE_123"
 
     let (config, _) = AppConfig::load_from_path(&config_path).expect("Erreur de chargement");
 
-    assert_eq!(config.sync_pairs.len(), 1, "La migration n'a pas créé la sync_pair");
-    assert_eq!(config.sync_pairs.first().unwrap().local_path, PathBuf::from("/tmp/test"));
+    assert_eq!(
+        config.sync_pairs.len(),
+        1,
+        "La migration n'a pas créé la sync_pair"
+    );
+    assert_eq!(
+        config.sync_pairs.first().unwrap().local_path,
+        PathBuf::from("/tmp/test")
+    );
 }
 
 // ── 2. CRÉATION DU BACKUP DE CONFIGURATION ──────────────────────────────────
@@ -55,13 +62,20 @@ async fn test_db_v1_migrated() {
     // 1. On crée le vieux schéma
     {
         let conn = Connection::open(&db_path).unwrap();
-        conn.execute("CREATE TABLE files (id TEXT PRIMARY KEY, local_path TEXT);", []).unwrap();
+        conn.execute(
+            "CREATE TABLE files (id TEXT PRIMARY KEY, local_path TEXT);",
+            [],
+        )
+        .unwrap();
     } // ← On libère le lock du fichier ici
 
     // 2. On lance la migration via ta structure Database
     let db = Database::open(&db_path).unwrap(); // Ajout du `mut` au cas où ta fonction le demande
     let db_result = db.init_and_migrate();
-    assert!(db_result.is_ok(), "L'initialisation/migration de la DB a échoué");
+    assert!(
+        db_result.is_ok(),
+        "L'initialisation/migration de la DB a échoué"
+    );
 }
 
 // ── 4. IDEMPOTENCE DE LA MIGRATION DB ───────────────────────────────────────
@@ -78,8 +92,5 @@ async fn test_db_migration_idempotent() {
     assert!(db1.is_ok(), "La première migration a échoué");
 
     let db2 = db.init_and_migrate();
-    assert!(
-        db2.is_ok(),
-        "La migration n'est pas idempotente !"
-    );
+    assert!(db2.is_ok(), "La migration n'est pas idempotente !");
 }

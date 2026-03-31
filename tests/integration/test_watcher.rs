@@ -11,7 +11,10 @@ use sync_g_drive::engine::{EngineCommand, SyncEngine};
 #[tokio::test]
 async fn test_watcher_detects_new_file() {
     let env = TestEnv::setup();
-    let primary_pair = env.config.get_primary_pair().expect("Aucun dossier configuré");
+    let primary_pair = env
+        .config
+        .get_primary_pair()
+        .expect("Aucun dossier configuré");
     let sync_dir = &primary_pair.local_path;
     std::fs::create_dir_all(sync_dir).unwrap();
 
@@ -22,7 +25,9 @@ async fn test_watcher_detects_new_file() {
     let shutdown = CancellationToken::new();
 
     let engine_handle = tokio::spawn(async move {
-        engine.run(env.db, shutdown.clone(), cmd_rx, status_tx).await
+        engine
+            .run(env.db, shutdown.clone(), cmd_rx, status_tx)
+            .await
     });
 
     // On laisse inotify s'attacher au dossier
@@ -35,14 +40,23 @@ async fn test_watcher_detects_new_file() {
     // Vérification
     let wait_res = tokio::time::timeout(Duration::from_secs(3), async {
         loop {
-            if env.mock_provider.get_calls().iter().any(|c| matches!(c, MockCall::Upload { .. })) {
+            if env
+                .mock_provider
+                .get_calls()
+                .iter()
+                .any(|c| matches!(c, MockCall::Upload { .. }))
+            {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-    }).await;
+    })
+    .await;
 
-    assert!(wait_res.is_ok(), "Le watcher n'a pas détecté le nouveau fichier");
+    assert!(
+        wait_res.is_ok(),
+        "Le watcher n'a pas détecté le nouveau fichier"
+    );
 
     let _ = cmd_tx.send(EngineCommand::Shutdown).await;
     let _ = engine_handle.await;
@@ -53,7 +67,10 @@ async fn test_watcher_detects_new_file() {
 #[tokio::test]
 async fn test_watcher_detects_delete() {
     let env = TestEnv::setup();
-    let primary_pair = env.config.get_primary_pair().expect("Aucun dossier configuré");
+    let primary_pair = env
+        .config
+        .get_primary_pair()
+        .expect("Aucun dossier configuré");
     let sync_dir = &primary_pair.local_path;
     std::fs::create_dir_all(sync_dir).unwrap();
 
@@ -68,19 +85,27 @@ async fn test_watcher_detects_delete() {
     let shutdown = CancellationToken::new();
 
     let engine_handle = tokio::spawn(async move {
-        engine.run(env.db, shutdown.clone(), cmd_rx, status_tx).await
+        engine
+            .run(env.db, shutdown.clone(), cmd_rx, status_tx)
+            .await
     });
 
     // On fait un ForceScan initial pour que le moteur "connaisse" le fichier
     let _ = cmd_tx.send(EngineCommand::ForceScan).await;
     let _ = tokio::time::timeout(Duration::from_secs(3), async {
         loop {
-            if env.mock_provider.get_calls().iter().any(|c| matches!(c, MockCall::Upload { .. })) {
+            if env
+                .mock_provider
+                .get_calls()
+                .iter()
+                .any(|c| matches!(c, MockCall::Upload { .. }))
+            {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-    }).await;
+    })
+    .await;
 
     env.mock_provider.clear_calls();
     tokio::time::sleep(Duration::from_millis(300)).await; // Laisse inotify souffler
@@ -91,14 +116,23 @@ async fn test_watcher_detects_delete() {
     // Vérification
     let wait_del = tokio::time::timeout(Duration::from_secs(3), async {
         loop {
-            if env.mock_provider.get_calls().iter().any(|c| matches!(c, MockCall::Delete { .. })) {
+            if env
+                .mock_provider
+                .get_calls()
+                .iter()
+                .any(|c| matches!(c, MockCall::Delete { .. }))
+            {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-    }).await;
+    })
+    .await;
 
-    assert!(wait_del.is_ok(), "Le watcher n'a pas détecté la suppression");
+    assert!(
+        wait_del.is_ok(),
+        "Le watcher n'a pas détecté la suppression"
+    );
 
     let _ = cmd_tx.send(EngineCommand::Shutdown).await;
     let _ = engine_handle.await;
@@ -106,12 +140,13 @@ async fn test_watcher_detects_delete() {
 
 // ── 3. DEBOUNCE (ANTI-REBOND) ─────────────────────────────────────────────────
 
-
-
 #[tokio::test]
 async fn test_watcher_debounce() {
     let env = TestEnv::setup();
-    let primary_pair = env.config.get_primary_pair().expect("Aucun dossier configuré");
+    let primary_pair = env
+        .config
+        .get_primary_pair()
+        .expect("Aucun dossier configuré");
     let sync_dir = &primary_pair.local_path;
     std::fs::create_dir_all(sync_dir).unwrap();
 
@@ -122,7 +157,9 @@ async fn test_watcher_debounce() {
     let shutdown = CancellationToken::new();
 
     let engine_handle = tokio::spawn(async move {
-        engine.run(env.db, shutdown.clone(), cmd_rx, status_tx).await
+        engine
+            .run(env.db, shutdown.clone(), cmd_rx, status_tx)
+            .await
     });
 
     tokio::time::sleep(Duration::from_millis(300)).await;
@@ -141,9 +178,15 @@ async fn test_watcher_debounce() {
 
     // Vérification : L'anti-rebond a dû fusionner les 5 événements en 1 seul Upload
     let calls = env.mock_provider.get_calls();
-    let upload_count = calls.iter().filter(|c| matches!(c, MockCall::Upload { .. })).count();
+    let upload_count = calls
+        .iter()
+        .filter(|c| matches!(c, MockCall::Upload { .. }))
+        .count();
 
-    assert_eq!(upload_count, 1, "Le debounce a échoué : il devrait y avoir exactement 1 upload pour la rafale");
+    assert_eq!(
+        upload_count, 1,
+        "Le debounce a échoué : il devrait y avoir exactement 1 upload pour la rafale"
+    );
 
     let _ = cmd_tx.send(EngineCommand::Shutdown).await;
     let _ = engine_handle.await;
@@ -154,7 +197,10 @@ async fn test_watcher_debounce() {
 #[tokio::test]
 async fn test_watcher_rename_within() {
     let env = TestEnv::setup();
-    let primary_pair = env.config.get_primary_pair().expect("Aucun dossier configuré");
+    let primary_pair = env
+        .config
+        .get_primary_pair()
+        .expect("Aucun dossier configuré");
     let sync_dir = &primary_pair.local_path;
     std::fs::create_dir_all(sync_dir).unwrap();
 
@@ -168,19 +214,27 @@ async fn test_watcher_rename_within() {
     let shutdown = CancellationToken::new();
 
     let engine_handle = tokio::spawn(async move {
-        engine.run(env.db, shutdown.clone(), cmd_rx, status_tx).await
+        engine
+            .run(env.db, shutdown.clone(), cmd_rx, status_tx)
+            .await
     });
 
     // ForceScan pour l'enregistrer dans la DB locale et sur le Mock
     let _ = cmd_tx.send(EngineCommand::ForceScan).await;
     let _ = tokio::time::timeout(Duration::from_secs(3), async {
         loop {
-            if env.mock_provider.get_calls().iter().any(|c| matches!(c, MockCall::Upload { .. })) {
+            if env
+                .mock_provider
+                .get_calls()
+                .iter()
+                .any(|c| matches!(c, MockCall::Upload { .. }))
+            {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-    }).await;
+    })
+    .await;
 
     env.mock_provider.clear_calls();
     tokio::time::sleep(Duration::from_millis(300)).await;
@@ -203,9 +257,13 @@ async fn test_watcher_rename_within() {
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-    }).await;
+    })
+    .await;
 
-    assert!(wait_rename.is_ok(), "Le watcher n'a pas déclenché d'appel Rename sur le cloud");
+    assert!(
+        wait_rename.is_ok(),
+        "Le watcher n'a pas déclenché d'appel Rename sur le cloud"
+    );
 
     let _ = cmd_tx.send(EngineCommand::Shutdown).await;
     let _ = engine_handle.await;
@@ -218,7 +276,10 @@ async fn test_watcher_rename_from_outside() {
     let env = TestEnv::setup();
 
     // Le dossier surveillé
-    let primary_pair = env.config.get_primary_pair().expect("Aucun dossier configuré");
+    let primary_pair = env
+        .config
+        .get_primary_pair()
+        .expect("Aucun dossier configuré");
     let sync_dir = &primary_pair.local_path;
     std::fs::create_dir_all(sync_dir).unwrap();
 
@@ -237,7 +298,9 @@ async fn test_watcher_rename_from_outside() {
     let shutdown = CancellationToken::new();
 
     let engine_handle = tokio::spawn(async move {
-        engine.run(env.db, shutdown.clone(), cmd_rx, status_tx).await
+        engine
+            .run(env.db, shutdown.clone(), cmd_rx, status_tx)
+            .await
     });
 
     tokio::time::sleep(Duration::from_millis(300)).await;
@@ -249,14 +312,23 @@ async fn test_watcher_rename_from_outside() {
     // Vérification : Ça doit déclencher un Upload (et non un Rename !)
     let wait_upload = tokio::time::timeout(Duration::from_secs(3), async {
         loop {
-            if env.mock_provider.get_calls().iter().any(|c| matches!(c, MockCall::Upload { .. })) {
+            if env
+                .mock_provider
+                .get_calls()
+                .iter()
+                .any(|c| matches!(c, MockCall::Upload { .. }))
+            {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-    }).await;
+    })
+    .await;
 
-    assert!(wait_upload.is_ok(), "Le fichier entrant n'a pas été uploadé par le watcher");
+    assert!(
+        wait_upload.is_ok(),
+        "Le fichier entrant n'a pas été uploadé par le watcher"
+    );
 
     let _ = cmd_tx.send(EngineCommand::Shutdown).await;
     let _ = engine_handle.await;

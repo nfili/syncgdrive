@@ -20,7 +20,9 @@ async fn test_command_pause_resume() {
     let shutdown = CancellationToken::new();
 
     let engine_handle = tokio::spawn(async move {
-        engine.run(env.db, shutdown.clone(), cmd_rx, status_tx).await
+        engine
+            .run(env.db, shutdown.clone(), cmd_rx, status_tx)
+            .await
     });
 
     // 1. On attend que le moteur soit prêt (Idle).
@@ -56,7 +58,9 @@ async fn test_command_shutdown() {
     let shutdown = CancellationToken::new();
 
     let engine_handle = tokio::spawn(async move {
-        engine.run(env.db, shutdown.clone(), cmd_rx, status_tx).await
+        engine
+            .run(env.db, shutdown.clone(), cmd_rx, status_tx)
+            .await
     });
 
     wait_for_status(&mut status_rx, |s| matches!(s, EngineStatus::Idle)).await;
@@ -69,7 +73,10 @@ async fn test_command_shutdown() {
 
     // Vérification 2 : Le thread (la tâche tokio) doit se terminer proprement sans timeout
     let result = tokio::time::timeout(Duration::from_secs(2), engine_handle).await;
-    assert!(result.is_ok(), "Le moteur a refusé de s'arrêter dans le temps imparti !");
+    assert!(
+        result.is_ok(),
+        "Le moteur a refusé de s'arrêter dans le temps imparti !"
+    );
 }
 
 // ── 3. TEST DE MISE À JOUR DE LA CONFIGURATION À CHAUD ──────────────────────
@@ -85,7 +92,9 @@ async fn test_command_apply_config() {
     let shutdown = CancellationToken::new();
 
     let engine_handle = tokio::spawn(async move {
-        engine.run(env.db, shutdown.clone(), cmd_rx, status_tx).await
+        engine
+            .run(env.db, shutdown.clone(), cmd_rx, status_tx)
+            .await
     });
 
     wait_for_status(&mut status_rx, |s| matches!(s, EngineStatus::Idle)).await;
@@ -95,7 +104,10 @@ async fn test_command_apply_config() {
     let new_config = Arc::new(env.config.clone());
 
     // 2. Action : On l'applique à chaud
-    cmd_tx.send(EngineCommand::ApplyConfig(new_config)).await.unwrap();
+    cmd_tx
+        .send(EngineCommand::ApplyConfig(new_config))
+        .await
+        .unwrap();
 
     // 3. Vérification : Le moteur doit digérer l'info et retourner à son cycle normal
     // Sans crasher, et se remettre en attente de travail.
@@ -118,7 +130,9 @@ async fn test_command_ui_states() {
     let shutdown = CancellationToken::new();
 
     let engine_handle = tokio::spawn(async move {
-        engine.run(env.db, shutdown.clone(), cmd_rx, status_tx).await
+        engine
+            .run(env.db, shutdown.clone(), cmd_rx, status_tx)
+            .await
     });
 
     wait_for_status(&mut status_rx, |s| matches!(s, EngineStatus::Idle)).await;
@@ -145,7 +159,7 @@ async fn test_command_ui_states() {
 /// ou échoue au bout de 2 secondes.
 async fn wait_for_status<F>(status_rx: &mut mpsc::UnboundedReceiver<EngineStatus>, predicate: F)
 where
-    F: Fn(&EngineStatus) -> bool
+    F: Fn(&EngineStatus) -> bool,
 {
     let timeout_res = tokio::time::timeout(Duration::from_secs(2), async {
         while let Some(status) = status_rx.recv().await {
@@ -153,7 +167,11 @@ where
                 return;
             }
         }
-    }).await;
+    })
+    .await;
 
-    assert!(timeout_res.is_ok(), "Le moteur n'a pas émis le statut attendu dans les temps");
+    assert!(
+        timeout_res.is_ok(),
+        "Le moteur n'a pas émis le statut attendu dans les temps"
+    );
 }

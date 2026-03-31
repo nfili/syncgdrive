@@ -1,9 +1,9 @@
+use anyhow::Result;
+use async_trait::async_trait;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use anyhow::Result;
-use async_trait::async_trait;
 use tempfile::TempDir;
 
 use sync_g_drive::config::{AppConfig, SyncPair};
@@ -21,25 +21,33 @@ pub struct MockFile {
 
 #[derive(Debug, Clone)]
 pub enum MockCall {
-    ListRemote { root_id: String },
-    Mkdir { parent_id: String, name: String },
+    ListRemote {
+        root_id: String,
+    },
+    Mkdir {
+        parent_id: String,
+        name: String,
+    },
     Upload {
         local_path: String,
         parent_id: String,
         file_name: String,
-        existing_id: Option<String>
+        existing_id: Option<String>,
     },
-    Delete { file_id: String },
+    Delete {
+        file_id: String,
+    },
     Rename {
         file_id: String,
         new_name: Option<String>,
-        new_parent_id: Option<String>
+        new_parent_id: Option<String>,
     },
-    GetChanges { cursor: Option<String> },
+    GetChanges {
+        cursor: Option<String>,
+    },
     CheckHealth,
     Shutdown,
 }
-
 
 // ── Le faux Google Drive (MockProvider) ───────────────────────────────────────
 
@@ -99,7 +107,6 @@ use sync_g_drive::remote::{ChangesPage, HealthStatus, RemoteIndex, RemoteProvide
 
 #[async_trait]
 impl RemoteProvider for MockProvider {
-
     async fn list_remote(&self, root_id: &str) -> Result<RemoteIndex> {
         self.calls
             .lock()
@@ -120,9 +127,9 @@ impl RemoteProvider for MockProvider {
             .lock()
             .map_err(|e| anyhow::anyhow!("Mutex empoisonné: {}", e))?
             .push(MockCall::Mkdir {
-            parent_id: parent_id.to_string(),
-            name: name.to_string(),
-        });
+                parent_id: parent_id.to_string(),
+                name: name.to_string(),
+            });
 
         let new_id = self.generate_id();
         self.dirs
@@ -144,17 +151,20 @@ impl RemoteProvider for MockProvider {
             .lock()
             .map_err(|e| anyhow::anyhow!("Mutex empoisonné: {}", e))?
             .push(MockCall::Upload {
-            local_path: local_path.to_string_lossy().to_string(),
-            parent_id: parent_id.to_string(),
-            file_name: file_name.to_string(),
-            existing_id: existing_id.map(|s| s.to_string()),
-        });
+                local_path: local_path.to_string_lossy().to_string(),
+                parent_id: parent_id.to_string(),
+                file_name: file_name.to_string(),
+                existing_id: existing_id.map(|s| s.to_string()),
+            });
 
         if self.is_offline.load(Ordering::SeqCst) {
             return Err(anyhow::anyhow!("Connexion perdue pendant l'upload"));
         }
         let fake_id = self.generate_id();
-        let size_bytes = tokio::fs::metadata(local_path).await.map(|m| m.len()).unwrap_or(0);
+        let size_bytes = tokio::fs::metadata(local_path)
+            .await
+            .map(|m| m.len())
+            .unwrap_or(0);
 
         // 2. On calcule son vrai MD5 pour satisfaire le moteur
         let real_md5 = sync_g_drive::engine::integrity::compute_hash(local_path).await?;
@@ -171,8 +181,8 @@ impl RemoteProvider for MockProvider {
             .lock()
             .map_err(|e| anyhow::anyhow!("Mutex empoisonné: {}", e))?
             .push(MockCall::Delete {
-            file_id: file_id.to_string(),
-        });
+                file_id: file_id.to_string(),
+            });
 
         self.files
             .lock()
@@ -191,10 +201,10 @@ impl RemoteProvider for MockProvider {
             .lock()
             .map_err(|e| anyhow::anyhow!("Mutex empoisonné: {}", e))?
             .push(MockCall::Rename {
-            file_id: file_id.to_string(),
-            new_name: new_name.map(|s| s.to_string()),
-            new_parent_id: new_parent_id.map(|s| s.to_string()),
-        });
+                file_id: file_id.to_string(),
+                new_name: new_name.map(|s| s.to_string()),
+                new_parent_id: new_parent_id.map(|s| s.to_string()),
+            });
         Ok(())
     }
 
@@ -203,8 +213,8 @@ impl RemoteProvider for MockProvider {
             .lock()
             .map_err(|e| anyhow::anyhow!("Mutex empoisonné: {}", e))?
             .push(MockCall::GetChanges {
-            cursor: cursor.map(|s| s.to_string()),
-        });
+                cursor: cursor.map(|s| s.to_string()),
+            });
 
         // Retourne une page de deltas vide
         Ok(ChangesPage {
@@ -227,9 +237,13 @@ impl RemoteProvider for MockProvider {
         // Simule une connexion Google Drive saine avec 15 Go de quota
         Ok(HealthStatus::Ok {
             email: "test_dry_run@gmail.com".to_string(),
-            quota_used: 1024 * 1024, // 1 Mo utilisé
+            quota_used: 1024 * 1024,              // 1 Mo utilisé
             quota_total: 15 * 1024 * 1024 * 1024, // 15 Go au total
         })
+    }
+
+    async fn refresh_auth(&self) -> Result<()> {
+        Ok(())
     }
 
     async fn shutdown(&self) {
@@ -256,7 +270,8 @@ impl TestEnv {
         let db_path = db_dir.path().join("index.db");
 
         let db = Database::open(&db_path).expect("Impossible d'ouvrir la DB de test");
-        db.init_and_migrate().expect("Impossible de migrer la DB de test");
+        db.init_and_migrate()
+            .expect("Impossible de migrer la DB de test");
 
         let mut config = AppConfig::default();
         config.sync_pairs.push(SyncPair {

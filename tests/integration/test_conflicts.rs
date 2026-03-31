@@ -11,7 +11,10 @@ use sync_g_drive::engine::{EngineCommand, SyncEngine};
 #[tokio::test]
 async fn test_conflict_local_wins_on_modify() {
     let env = TestEnv::setup();
-    let primary_pair = env.config.get_primary_pair().expect("Aucun dossier configuré");
+    let primary_pair = env
+        .config
+        .get_primary_pair()
+        .expect("Aucun dossier configuré");
     let sync_dir = &primary_pair.local_path;
     std::fs::create_dir_all(sync_dir).unwrap();
 
@@ -25,19 +28,27 @@ async fn test_conflict_local_wins_on_modify() {
     let shutdown = CancellationToken::new();
 
     let engine_handle = tokio::spawn(async move {
-        engine.run(env.db, shutdown.clone(), cmd_rx, status_tx).await
+        engine
+            .run(env.db, shutdown.clone(), cmd_rx, status_tx)
+            .await
     });
 
     // 1. Upload initial pour établir la base
     let _ = cmd_tx.send(EngineCommand::ForceScan).await;
     let _ = tokio::time::timeout(Duration::from_secs(3), async {
         loop {
-            if env.mock_provider.get_calls().iter().any(|c| matches!(c, MockCall::Upload { .. })) {
+            if env
+                .mock_provider
+                .get_calls()
+                .iter()
+                .any(|c| matches!(c, MockCall::Upload { .. }))
+            {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-    }).await;
+    })
+    .await;
 
     // Respiration temporelle pour l'horodatage système et SQLite
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -53,14 +64,23 @@ async fn test_conflict_local_wins_on_modify() {
     // 3. Vérification : Le moteur force l'Upload
     let wait_conflict = tokio::time::timeout(Duration::from_secs(3), async {
         loop {
-            if env.mock_provider.get_calls().iter().any(|c| matches!(c, MockCall::Upload { .. })) {
+            if env
+                .mock_provider
+                .get_calls()
+                .iter()
+                .any(|c| matches!(c, MockCall::Upload { .. }))
+            {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-    }).await;
+    })
+    .await;
 
-    assert!(wait_conflict.is_ok(), "Le moteur n'a pas imposé la version locale (Upload manquant)");
+    assert!(
+        wait_conflict.is_ok(),
+        "Le moteur n'a pas imposé la version locale (Upload manquant)"
+    );
 
     let _ = cmd_tx.send(EngineCommand::Shutdown).await;
     let _ = engine_handle.await;
@@ -71,7 +91,10 @@ async fn test_conflict_local_wins_on_modify() {
 #[tokio::test]
 async fn test_conflict_local_wins_on_delete() {
     let env = TestEnv::setup();
-    let primary_pair = env.config.get_primary_pair().expect("Aucun dossier configuré");
+    let primary_pair = env
+        .config
+        .get_primary_pair()
+        .expect("Aucun dossier configuré");
     let sync_dir = &primary_pair.local_path;
     std::fs::create_dir_all(sync_dir).unwrap();
 
@@ -85,19 +108,27 @@ async fn test_conflict_local_wins_on_delete() {
     let shutdown = CancellationToken::new();
 
     let engine_handle = tokio::spawn(async move {
-        engine.run(env.db, shutdown.clone(), cmd_rx, status_tx).await
+        engine
+            .run(env.db, shutdown.clone(), cmd_rx, status_tx)
+            .await
     });
 
     // 1. Upload initial
     let _ = cmd_tx.send(EngineCommand::ForceScan).await;
     let _ = tokio::time::timeout(Duration::from_secs(3), async {
         loop {
-            if env.mock_provider.get_calls().iter().any(|c| matches!(c, MockCall::Upload { .. })) {
+            if env
+                .mock_provider
+                .get_calls()
+                .iter()
+                .any(|c| matches!(c, MockCall::Upload { .. }))
+            {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-    }).await;
+    })
+    .await;
 
     tokio::time::sleep(Duration::from_millis(500)).await;
     env.mock_provider.clear_calls();
@@ -111,14 +142,23 @@ async fn test_conflict_local_wins_on_delete() {
     // 3. Vérification : Ordre de suppression envoyé
     let wait_delete = tokio::time::timeout(Duration::from_secs(3), async {
         loop {
-            if env.mock_provider.get_calls().iter().any(|c| matches!(c, MockCall::Delete { .. })) {
+            if env
+                .mock_provider
+                .get_calls()
+                .iter()
+                .any(|c| matches!(c, MockCall::Delete { .. }))
+            {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-    }).await;
+    })
+    .await;
 
-    assert!(wait_delete.is_ok(), "Le moteur n'a pas propagé la suppression locale sur le cloud");
+    assert!(
+        wait_delete.is_ok(),
+        "Le moteur n'a pas propagé la suppression locale sur le cloud"
+    );
 
     let _ = cmd_tx.send(EngineCommand::Shutdown).await;
     let _ = engine_handle.await;
@@ -129,7 +169,10 @@ async fn test_conflict_local_wins_on_delete() {
 #[tokio::test]
 async fn test_conflict_local_wins_on_rename() {
     let env = TestEnv::setup();
-    let primary_pair = env.config.get_primary_pair().expect("Aucun dossier configuré");
+    let primary_pair = env
+        .config
+        .get_primary_pair()
+        .expect("Aucun dossier configuré");
     let sync_dir = &primary_pair.local_path;
     std::fs::create_dir_all(sync_dir).unwrap();
 
@@ -143,19 +186,27 @@ async fn test_conflict_local_wins_on_rename() {
     let shutdown = CancellationToken::new();
 
     let engine_handle = tokio::spawn(async move {
-        engine.run(env.db, shutdown.clone(), cmd_rx, status_tx).await
+        engine
+            .run(env.db, shutdown.clone(), cmd_rx, status_tx)
+            .await
     });
 
     // 1. Upload initial
     let _ = cmd_tx.send(EngineCommand::ForceScan).await;
     let _ = tokio::time::timeout(Duration::from_secs(3), async {
         loop {
-            if env.mock_provider.get_calls().iter().any(|c| matches!(c, MockCall::Upload { .. })) {
+            if env
+                .mock_provider
+                .get_calls()
+                .iter()
+                .any(|c| matches!(c, MockCall::Upload { .. }))
+            {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-    }).await;
+    })
+    .await;
 
     tokio::time::sleep(Duration::from_millis(500)).await;
     env.mock_provider.clear_calls();
@@ -180,9 +231,13 @@ async fn test_conflict_local_wins_on_rename() {
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-    }).await;
+    })
+    .await;
 
-    assert!(wait_rename.is_ok(), "Le moteur n'a pas imposé le renommage local sur le cloud");
+    assert!(
+        wait_rename.is_ok(),
+        "Le moteur n'a pas imposé le renommage local sur le cloud"
+    );
 
     let _ = cmd_tx.send(EngineCommand::Shutdown).await;
     let _ = engine_handle.await;

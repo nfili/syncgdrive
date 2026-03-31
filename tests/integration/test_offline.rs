@@ -12,7 +12,10 @@ use sync_g_drive::engine::{EngineCommand, SyncEngine};
 #[tokio::test]
 async fn test_offline_queues_events() {
     let env = TestEnv::setup();
-    let primary_pair = env.config.get_primary_pair().expect("Aucun dossier configuré");
+    let primary_pair = env
+        .config
+        .get_primary_pair()
+        .expect("Aucun dossier configuré");
     let sync_dir = &primary_pair.local_path;
     std::fs::create_dir_all(sync_dir).unwrap();
 
@@ -22,11 +25,13 @@ async fn test_offline_queues_events() {
     let mock = Arc::new(env.mock_provider.clone());
     let engine = SyncEngine::new(Arc::new(env.config.clone()), false, mock);
     let (cmd_tx, cmd_rx) = mpsc::channel::<EngineCommand>(10);
-    let (status_tx,_) = mpsc::unbounded_channel();
+    let (status_tx, _) = mpsc::unbounded_channel();
     let shutdown = CancellationToken::new();
 
     let engine_handle = tokio::spawn(async move {
-        engine.run(env.db, shutdown.clone(), cmd_rx, status_tx).await
+        engine
+            .run(env.db, shutdown.clone(), cmd_rx, status_tx)
+            .await
     });
 
     // 2. Action : Création d'un fichier pendant la coupure
@@ -38,14 +43,23 @@ async fn test_offline_queues_events() {
     // 3. Vérification : Le moteur doit tenter l'upload, échouer, et le mettre en queue
     let wait_offline = tokio::time::timeout(Duration::from_secs(3), async {
         loop {
-            if env.mock_provider.get_calls().iter().any(|c| matches!(c, MockCall::Upload { .. })) {
+            if env
+                .mock_provider
+                .get_calls()
+                .iter()
+                .any(|c| matches!(c, MockCall::Upload { .. }))
+            {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-    }).await;
+    })
+    .await;
 
-    assert!(wait_offline.is_ok(), "Le moteur n'a pas tenté de traiter l'événement hors-ligne");
+    assert!(
+        wait_offline.is_ok(),
+        "Le moteur n'a pas tenté de traiter l'événement hors-ligne"
+    );
 
     let _ = cmd_tx.send(EngineCommand::Shutdown).await;
     let _ = engine_handle.await;
@@ -56,7 +70,10 @@ async fn test_offline_queues_events() {
 #[tokio::test]
 async fn test_online_flushes_queue() {
     let env = TestEnv::setup();
-    let primary_pair = env.config.get_primary_pair().expect("Aucun dossier configuré");
+    let primary_pair = env
+        .config
+        .get_primary_pair()
+        .expect("Aucun dossier configuré");
     let sync_dir = &primary_pair.local_path;
     std::fs::create_dir_all(sync_dir).unwrap();
 
@@ -70,7 +87,9 @@ async fn test_online_flushes_queue() {
     let shutdown = CancellationToken::new();
 
     let engine_handle = tokio::spawn(async move {
-        engine.run(env.db, shutdown.clone(), cmd_rx, status_tx).await
+        engine
+            .run(env.db, shutdown.clone(), cmd_rx, status_tx)
+            .await
     });
 
     let file_path = sync_dir.join("fichier_a_flusher.txt");
@@ -80,12 +99,18 @@ async fn test_online_flushes_queue() {
     // On attend que la tentative hors-ligne échoue et soit mise en queue
     let _ = tokio::time::timeout(Duration::from_secs(3), async {
         loop {
-            if env.mock_provider.get_calls().iter().any(|c| matches!(c, MockCall::Upload { .. })) {
+            if env
+                .mock_provider
+                .get_calls()
+                .iter()
+                .any(|c| matches!(c, MockCall::Upload { .. }))
+            {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-    }).await;
+    })
+    .await;
 
     // 2. Action : On rétablit le réseau !
     env.mock_provider.clear_calls(); // On nettoie l'historique pour la vérification
@@ -97,14 +122,23 @@ async fn test_online_flushes_queue() {
     // 3. Vérification : Le fichier est bien uploadé
     let wait_online = tokio::time::timeout(Duration::from_secs(3), async {
         loop {
-            if env.mock_provider.get_calls().iter().any(|c| matches!(c, MockCall::Upload { .. })) {
+            if env
+                .mock_provider
+                .get_calls()
+                .iter()
+                .any(|c| matches!(c, MockCall::Upload { .. }))
+            {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-    }).await;
+    })
+    .await;
 
-    assert!(wait_online.is_ok(), "Le fichier n'a pas été uploadé après le retour du réseau");
+    assert!(
+        wait_online.is_ok(),
+        "Le fichier n'a pas été uploadé après le retour du réseau"
+    );
 
     let _ = cmd_tx.send(EngineCommand::Shutdown).await;
     let _ = engine_handle.await;
@@ -115,7 +149,10 @@ async fn test_online_flushes_queue() {
 #[tokio::test]
 async fn test_offline_dedup() {
     let env = TestEnv::setup();
-    let primary_pair = env.config.get_primary_pair().expect("Aucun dossier configuré");
+    let primary_pair = env
+        .config
+        .get_primary_pair()
+        .expect("Aucun dossier configuré");
     let sync_dir = &primary_pair.local_path;
     std::fs::create_dir_all(sync_dir).unwrap();
 
@@ -129,7 +166,9 @@ async fn test_offline_dedup() {
     let shutdown = CancellationToken::new();
 
     let engine_handle = tokio::spawn(async move {
-        engine.run(env.db, shutdown.clone(), cmd_rx, status_tx).await
+        engine
+            .run(env.db, shutdown.clone(), cmd_rx, status_tx)
+            .await
     });
 
     let file_path = sync_dir.join("fichier_modifie_3_fois.txt");
@@ -151,22 +190,37 @@ async fn test_offline_dedup() {
     // 4. On attend que l'upload se fasse
     let wait_flush = tokio::time::timeout(Duration::from_secs(3), async {
         loop {
-            if env.mock_provider.get_calls().iter().any(|c| matches!(c, MockCall::Upload { .. })) {
+            if env
+                .mock_provider
+                .get_calls()
+                .iter()
+                .any(|c| matches!(c, MockCall::Upload { .. }))
+            {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-    }).await;
-    assert!(wait_flush.is_ok(), "Le flush n'a pas eu lieu au retour du réseau");
+    })
+    .await;
+    assert!(
+        wait_flush.is_ok(),
+        "Le flush n'a pas eu lieu au retour du réseau"
+    );
 
     // Laisse un instant au moteur pour éventuellement (à tort) envoyer des doublons
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     // 5. Vérification stricte : Exactement 1 seul upload pour les 3 modifications
     let calls = env.mock_provider.get_calls();
-    let upload_count = calls.iter().filter(|c| matches!(c, MockCall::Upload { .. })).count();
+    let upload_count = calls
+        .iter()
+        .filter(|c| matches!(c, MockCall::Upload { .. }))
+        .count();
 
-    assert_eq!(upload_count, 1, "La déduplication a échoué : le moteur a envoyé plusieurs uploads pour le même fichier !");
+    assert_eq!(
+        upload_count, 1,
+        "La déduplication a échoué : le moteur a envoyé plusieurs uploads pour le même fichier !"
+    );
 
     let _ = cmd_tx.send(EngineCommand::Shutdown).await;
     let _ = engine_handle.await;
