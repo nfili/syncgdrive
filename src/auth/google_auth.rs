@@ -138,9 +138,9 @@ impl GoogleAuth {
                 .unwrap_or(tokens.refresh_token), // On garde l'ancien si pas de nouveau
             expires_at: chrono::Utc::now().timestamp()
                 + token_response
-                .expires_in()
-                .map(|d| d.as_secs())
-                .unwrap_or(3599) as i64,
+                    .expires_in()
+                    .map(|d| d.as_secs())
+                    .unwrap_or(3599) as i64,
             scope: tokens.scope.clone(),
         };
 

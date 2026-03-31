@@ -41,7 +41,7 @@ pub fn show_settings_in_app(
         let _ = cmd_tx.try_send(EngineCommand::ApplyConfig(Arc::new(new_cfg)));
         let _ = cmd_tx.try_send(EngineCommand::Resume);
     })
-        .expect("Erreur création fenêtre réglages");
+    .expect("Erreur création fenêtre réglages");
 
     // 3. Si on ferme avec la croix sans enregistrer, on enlève la pause !
     win.connect_close_request(move |_| {
@@ -210,7 +210,10 @@ where
             gtk4::glib::MainContext::default().spawn_local(async move {
                 let (tx, rx) = tokio::sync::oneshot::channel();
                 std::thread::spawn(move || {
-                    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("Erreur runtime");
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .expect("Erreur runtime");
                     let res = rt.block_on(async {
                         let local_auth = crate::auth::GoogleAuth::new();
                         local_auth.revoke_token().await
@@ -242,7 +245,10 @@ where
                 let (tx, rx) = tokio::sync::oneshot::channel();
 
                 std::thread::spawn(move || {
-                    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("Erreur runtime");
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .expect("Erreur runtime");
                     let res = rt.block_on(async {
                         let creds = crate::auth::OAuthAppCredentials::default();
                         crate::auth::oauth2::authenticate(&creds).await
@@ -696,7 +702,7 @@ fn browse_exclude(
     });
 }
 
-/// Génère un pattern glob (ex: `**/*.log`) à partir d'un chemin sélectionné 
+/// Génère un pattern glob (ex: `**/*.log`) à partir d'un chemin sélectionné
 /// relativement à la racine du dossier synchronisé.
 fn path_to_glob(local_root_text: &str, selected: &std::path::Path) -> String {
     let local_root = std::path::Path::new(local_root_text);

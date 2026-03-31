@@ -37,16 +37,14 @@ pub struct TrayContext {
     pub status_rx: tokio::sync::mpsc::UnboundedReceiver<EngineStatus>,
     pub config: Arc<Mutex<AppConfig>>,
     pub open_settings: bool,
-    pub shutdown:CancellationToken,
+    pub shutdown: CancellationToken,
     pub log_dir: PathBuf,
     pub ui_tx: tokio::sync::mpsc::UnboundedSender<crate::ui::UiCommand>,
     pub dry_run: bool,
 }
 
 /// Démarre le gestionnaire de l'icône de la zone de notification (Systray).
-pub fn spawn_tray(
-    ctx: TrayContext
-) -> Result<()> {
+pub fn spawn_tray(ctx: TrayContext) -> Result<()> {
     let sd = ctx.shutdown.clone();
     let autostart = is_autostart_enabled();
 
@@ -236,9 +234,9 @@ impl ksni::Tray for SyncTray {
                     format!("SyncGDrive — {label}…")
                 }
             }
-            EngineStatus::SyncProgress(snap) =>{
+            EngineStatus::SyncProgress(snap) => {
                 let current_idx = (snap.done_files + 1).min(snap.total_files);
-                format!("SyncGDrive — ↑ {}/{}",current_idx, snap.total_files)
+                format!("SyncGDrive — ↑ {}/{}", current_idx, snap.total_files)
             }
             EngineStatus::Syncing { active } => format!("SyncGDrive — {active} transfert(s)"),
             EngineStatus::Paused => "SyncGDrive — ⏸ En pause".into(),
@@ -258,7 +256,9 @@ impl ksni::Tray for SyncTray {
         let title = self.title();
         let description = match &*self.status.lock().unwrap() {
             EngineStatus::Starting(p) => format!("Initialisation en cours ({}%)…", p),
-            EngineStatus::Unconfigured(reason) => format!("Ouvrez les Réglages pour configurer.\n{reason}"),
+            EngineStatus::Unconfigured(reason) => {
+                format!("Ouvrez les Réglages pour configurer.\n{reason}")
+            }
             EngineStatus::Idle => {
                 let cfg = self.config.lock().unwrap();
                 let last = if self.last_synced.is_empty() {
@@ -276,8 +276,10 @@ impl ksni::Tray for SyncTray {
                     .first()
                     .map(|p| p.remote_folder_id.clone())
                     .unwrap_or_else(|| "Aucun".into());
-                format!("Surveillance active — Dossier à jour.\n{} → {}{}",
-                        local_disp, remote_disp, last)
+                format!(
+                    "Surveillance active — Dossier à jour.\n{} → {}{}",
+                    local_disp, remote_disp, last
+                )
             }
             EngineStatus::ScanProgress {
                 phase,
@@ -287,7 +289,9 @@ impl ksni::Tray for SyncTray {
             } => {
                 let (_, clean_name) = crate::utils::path_display::split_path_display(current);
                 match phase {
-                    ScanPhase::RemoteListing =>format!("Analyse Google Drive en cours…\n(Lecture de : {clean_name})"),
+                    ScanPhase::RemoteListing => {
+                        format!("Analyse Google Drive en cours…\n(Lecture de : {clean_name})")
+                    }
                     ScanPhase::LocalListing => {
                         let detail = if *done > 0 {
                             format!("({done} éléments indexés)")
@@ -350,11 +354,15 @@ impl ksni::Tray for SyncTray {
                 // )
             }
             EngineStatus::Syncing { .. } => "Transferts vers Google Drive…".into(),
-            EngineStatus::Paused => "Moteur suspendu.\n(Ouvrez le menu contextuel pour reprendre)".into(),
+            EngineStatus::Paused => {
+                "Moteur suspendu.\n(Ouvrez le menu contextuel pour reprendre)".into()
+            }
             EngineStatus::Error(e) => format!("{e}\nVérifiez les logs ou les tokens KIO."),
             EngineStatus::Stopped => "Le moteur est arrêté.".into(),
             EngineStatus::Settings => "Synchronisation en pause pendant la configuration.".into(), // <-- Explication claire
-            EngineStatus::Help => "Synchronisation en pause pendant l'affichage de la fenêtre.".into(),
+            EngineStatus::Help => {
+                "Synchronisation en pause pendant l'affichage de la fenêtre.".into()
+            }
         };
 
         ksni::ToolTip {
@@ -384,7 +392,7 @@ impl ksni::Tray for SyncTray {
                 enabled: false,
                 ..Default::default()
             }
-                .into(),
+            .into(),
         );
         items.push(MenuItem::Separator);
 
@@ -398,7 +406,7 @@ impl ksni::Tray for SyncTray {
                     }),
                     ..Default::default()
                 }
-                    .into(),
+                .into(),
             );
         } else if is_active {
             items.push(
@@ -410,7 +418,7 @@ impl ksni::Tray for SyncTray {
                     }),
                     ..Default::default()
                 }
-                    .into(),
+                .into(),
             );
         } else {
             items.push(
@@ -422,7 +430,7 @@ impl ksni::Tray for SyncTray {
                     }),
                     ..Default::default()
                 }
-                    .into(),
+                .into(),
             );
         }
 
@@ -444,7 +452,7 @@ impl ksni::Tray for SyncTray {
                 }),
                 ..Default::default()
             }
-                .into(),
+            .into(),
         );
 
         let remote = self
@@ -466,7 +474,7 @@ impl ksni::Tray for SyncTray {
                 }),
                 ..Default::default()
             }
-                .into(),
+            .into(),
         );
 
         items.push(MenuItem::Separator);
@@ -485,7 +493,7 @@ impl ksni::Tray for SyncTray {
                 }),
                 ..Default::default()
             }
-                .into(),
+            .into(),
         );
 
         items.push(
@@ -497,7 +505,7 @@ impl ksni::Tray for SyncTray {
                 }),
                 ..Default::default()
             }
-                .into(),
+            .into(),
         );
 
         let p = self.log_dir.clone();
@@ -510,7 +518,7 @@ impl ksni::Tray for SyncTray {
                 }),
                 ..Default::default()
             }
-                .into(),
+            .into(),
         );
 
         items.push(
@@ -522,7 +530,7 @@ impl ksni::Tray for SyncTray {
                 }),
                 ..Default::default()
             }
-                .into(),
+            .into(),
         );
 
         items.push(
@@ -534,7 +542,7 @@ impl ksni::Tray for SyncTray {
                 }),
                 ..Default::default()
             }
-                .into(),
+            .into(),
         );
 
         items.push(MenuItem::Separator);
@@ -548,7 +556,7 @@ impl ksni::Tray for SyncTray {
                 }),
                 ..Default::default()
             }
-                .into(),
+            .into(),
         );
 
         items
@@ -607,10 +615,10 @@ pub fn show_about_in_app(app: &libadwaita::Application) {
     let about = libadwaita::AboutWindow::builder()
         .application_name("SyncGDrive")
         .version(env!("CARGO_PKG_VERSION"))
-        .developer_name("clyds")
+        .developer_name("clyds (Nicolas Filippozzi)")
         .license_type(gtk4::License::MitX11)
         .comments("Synchronisation unidirectionnelle d'un dossier local vers Google Drive.")
-        .website("https://github.com/clyds/SyncGDrive")
+        .website("https://github.com/nfili/syncgdrive")
         .application_icon("emblem-synchronizing-symbolic")
         .application(app)
         .build();

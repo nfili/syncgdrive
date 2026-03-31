@@ -19,7 +19,7 @@ struct RateState {
 
 /// Bouclier anti-bannissement pour les requêtes sortantes.
 ///
-/// Implémente l'algorithme "Token Bucket" pour lisser les envois, 
+/// Implémente l'algorithme "Token Bucket" pour lisser les envois,
 /// et un mécanisme de "Verrouillage Temporel" en cas de punition par le serveur.
 pub struct ApiRateLimiter {
     max_rps: u32,
@@ -43,7 +43,7 @@ impl ApiRateLimiter {
 
     /// Demande l'autorisation d'envoyer une requête API.
     ///
-    /// Cette méthode est asynchrone : si le quota est dépassé, elle mettra 
+    /// Cette méthode est asynchrone : si le quota est dépassé, elle mettra
     /// gracieusement la coroutine en pause (`sleep`) jusqu'à ce qu'un créneau se libère.
     pub async fn acquire(&self) {
         if self.max_rps == 0 {

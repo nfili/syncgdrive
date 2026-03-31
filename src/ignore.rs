@@ -109,7 +109,10 @@ mod tests {
         let m = IgnoreMatcher::from_patterns(&["**/syncgdrive_test_ignore_dir/**".to_string()])
             .unwrap();
 
-        assert!(m.is_ignored(&dir, dir.is_dir()), "directory itself should be ignored");
+        assert!(
+            m.is_ignored(&dir, dir.is_dir()),
+            "directory itself should be ignored"
+        );
         assert!(
             m.is_ignored(&dir.join("some_file.rs"), dir.is_dir()),
             "file inside ignored dir should be ignored"
@@ -133,7 +136,7 @@ mod tests {
             "**/.git/**".into(),
             "**/node_modules/**".into(),
         ])
-            .unwrap();
+        .unwrap();
 
         // On passe 'false' car ce sont des fichiers
         assert!(m.is_ignored(Path::new("/proj/target/debug/bin"), false));

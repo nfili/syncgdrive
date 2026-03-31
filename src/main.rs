@@ -9,13 +9,13 @@
 
 use anyhow::{Context, Result};
 use std::sync::atomic::{AtomicI32, Ordering};
-use std::sync::{Arc};
-use tokio::sync::mpsc;
-use tokio_util::sync::CancellationToken;
-use tracing::{info, warn};
+use std::sync::Arc;
 use sync_g_drive::db::Database;
 use sync_g_drive::engine::{EngineCommand, EngineStatus, SyncEngine};
 use sync_g_drive::migration;
+use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
+use tracing::{info, warn};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -117,14 +117,17 @@ async fn main() -> Result<()> {
                 path_cache,
                 advanced_cfg,
                 shutdown.clone(),
-            ).expect("Impossible d'initialiser Google Drive")
+            )
+            .expect("Impossible d'initialiser Google Drive"),
         );
-        tokio::spawn(SyncEngine::new(Arc::from(cfg.clone()), dry_run, gdrive).run(
-            db,
-            shutdown.clone(),
-            cmd_rx,
-            status_tx,
-        ))
+        tokio::spawn(
+            SyncEngine::new(Arc::from(cfg.clone()), dry_run, gdrive).run(
+                db,
+                shutdown.clone(),
+                cmd_rx,
+                status_tx,
+            ),
+        )
     };
 
     // ── Phase 5 : Démarrage du Systray ────────────────────────────────────
@@ -145,9 +148,7 @@ async fn main() -> Result<()> {
             ui_tx,
             dry_run,
         };
-        sync_g_drive::ui::spawn_tray(
-            ctx_tray
-        )?;
+        sync_g_drive::ui::spawn_tray(ctx_tray)?;
     }
 
     #[cfg(not(feature = "ui"))]
@@ -161,7 +162,8 @@ async fn main() -> Result<()> {
 
     // ── Phase 6 : Attente d'un signal d'arrêt ─────────────────────────────
 
-    let async_fd = tokio::io::unix::AsyncFd::new(signal_fd).context("Erreur sur le descripteur asynchrone des signaux")?;
+    let async_fd = tokio::io::unix::AsyncFd::new(signal_fd)
+        .context("Erreur sur le descripteur asynchrone des signaux")?;
 
     tokio::select! {
         _ = async_fd.readable() => {
@@ -202,7 +204,7 @@ extern "C" fn signal_handler(_sig: libc::c_int) {
     }
 }
 
-/// Prépare un tube (pipe) non-bloquant pour capturer les signaux POSIX de 
+/// Prépare un tube (pipe) non-bloquant pour capturer les signaux POSIX de
 /// manière sûre et les réinjecter dans la boucle d'événements asynchrone de Tokio.
 fn setup_signal_pipe() -> i32 {
     let mut fds = [0i32; 2];
@@ -249,8 +251,8 @@ fn acquire_instance_lock() -> std::fs::File {
                 .timeout(4000)
                 .show();
         })
-            .join()
-            .unwrap();
+        .join()
+        .unwrap();
 
         std::process::exit(0);
     }
@@ -292,7 +294,8 @@ fn xdg_dir(env: &str, fallback: &str) -> std::path::PathBuf {
 
 /// Supprime les fichiers de log plus anciens que `max_days` configuré.
 fn cleanup_old_logs(log_dir: &std::path::Path, max_days: u64) {
-    let cutoff = std::time::SystemTime::now() - std::time::Duration::from_secs(max_days * 24 * 3600);
+    let cutoff =
+        std::time::SystemTime::now() - std::time::Duration::from_secs(max_days * 24 * 3600);
     let entries = match std::fs::read_dir(log_dir) {
         Ok(e) => e,
         Err(_) => return,
@@ -317,7 +320,8 @@ fn init_logging(log_dir: &std::path::Path) -> Result<tracing_appender::non_block
         .unwrap_or_else(|_| EnvFilter::new("info,zbus=warn,globset=warn,glib=warn"));
 
     // Format de temps précis
-    let timer = time::format_description::parse("[hour]:[minute]:[second]").expect("Erreur de parsing du format temporel");
+    let timer = time::format_description::parse("[hour]:[minute]:[second]")
+        .expect("Erreur de parsing du format temporel");
     let timer = fmt::time::UtcTime::new(timer);
 
     let stdout = fmt::layer()

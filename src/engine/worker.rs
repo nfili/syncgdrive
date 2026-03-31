@@ -20,16 +20,15 @@ use crate::ignore::IgnoreMatcher;
 ///
 /// Intercepte la tâche en mode "simulation" (`dry_run`) pour l'afficher sans l'exécuter.
 /// Sinon, délègue le traitement à la fonction spécialisée correspondante.
-pub(crate) async fn handle(
-    task: Task,
-    ctx: &EngineContext,
-    ignore: &IgnoreMatcher,
-) -> Result<()> {
+pub(crate) async fn handle(task: Task, ctx: &EngineContext, ignore: &IgnoreMatcher) -> Result<()> {
     // ── Mode Simulation ───────────────────────────────────────────────────────
     if ctx.dry_run {
         match &task {
             Task::SyncFile { path } => {
-                let size = tokio::fs::metadata(path).await.map(|m| m.len()).unwrap_or(0);
+                let size = tokio::fs::metadata(path)
+                    .await
+                    .map(|m| m.len())
+                    .unwrap_or(0);
                 tracing::info!("[DRY-RUN] upload: {} ({} octets)", path.display(), size);
             }
             Task::Delete(path) => {
@@ -56,11 +55,7 @@ pub(crate) async fn handle(
 ///
 /// Vérifie d'abord si le fichier nécessite réellement un upload via son MTime et son Hash.
 /// Gère la création des versions (re-upload sur le même ID) et vérifie l'intégrité (MD5) post-upload.
-async fn sync_file(
-    path: &Path,
-    ctx: &EngineContext,
-    ignore: &IgnoreMatcher,
-) -> Result<()> {
+async fn sync_file(path: &Path, ctx: &EngineContext, ignore: &IgnoreMatcher) -> Result<()> {
     let meta = path.metadata()?;
     if ignore.is_ignored(path, meta.is_dir()) || !meta.is_file() {
         return Ok(());
@@ -130,7 +125,8 @@ async fn sync_file(
         .unwrap_or_else(|| Path::new(""))
         .to_string_lossy()
         .to_string();
-    ctx.tracker.set_current_file(parent_dir_name, file_name.clone(), file_size);
+    ctx.tracker
+        .set_current_file(parent_dir_name, file_name.clone(), file_size);
 
     // Boucle d'Upload avec gestion de la reprise sur erreur et vérification d'intégrité
     let mut attempt = 1;
@@ -142,7 +138,8 @@ async fn sync_file(
             anyhow::bail!("Annulé");
         }
 
-        match ctx.provider
+        match ctx
+            .provider
             .upload(
                 path,
                 &parent_id,
@@ -205,11 +202,7 @@ async fn sync_file(
 // ── Suppression ───────────────────────────────────────────────────────────────
 
 /// Supprime un fichier sur le cloud pour refléter la suppression locale.
-async fn delete(
-    path: &Path,
-    ctx: &EngineContext,
-    ignore: &IgnoreMatcher,
-) -> Result<()> {
+async fn delete(path: &Path, ctx: &EngineContext, ignore: &IgnoreMatcher) -> Result<()> {
     if ignore.is_ignored(path, path.is_dir()) {
         return Ok(());
     }
@@ -224,7 +217,7 @@ async fn delete(
         retry(&ctx.cfg, &ctx.shutdown, "delete", || async {
             ctx.provider.delete(&entry.drive_id).await
         })
-            .await?;
+        .await?;
 
         ctx.path_cache.remove_cascades(&rel).await;
     }
@@ -237,12 +230,7 @@ async fn delete(
 // ── Renommage ─────────────────────────────────────────────────────────────────
 
 /// Déplace ou renomme un fichier sur le cloud sans le ré-uploader.
-async fn rename(
-    from: &Path,
-    to: &Path,
-    ctx: &EngineContext,
-    ignore: &IgnoreMatcher,
-) -> Result<()> {
+async fn rename(from: &Path, to: &Path, ctx: &EngineContext, ignore: &IgnoreMatcher) -> Result<()> {
     if ignore.is_ignored(from, from.is_dir()) && ignore.is_ignored(to, to.is_dir()) {
         return Ok(());
     }
@@ -256,7 +244,7 @@ async fn rename(
 
     // Si on ne connait pas l'original, on le traite comme un nouveau fichier
     if from_entry.is_none() || !from_in_db {
-        if to.is_file() && !ignore.is_ignored(to,to.is_dir()) {
+        if to.is_file() && !ignore.is_ignored(to, to.is_dir()) {
             return sync_file(to, ctx, ignore).await;
         }
         return Ok(());
@@ -265,7 +253,7 @@ async fn rename(
     let file_id = from_entry.unwrap().drive_id;
     let new_name = to.file_name().unwrap().to_string_lossy().to_string();
 
-    let new_parent_rel =parent_rel_str(&primary.local_path, to);
+    let new_parent_rel = parent_rel_str(&primary.local_path, to);
 
     let new_parent_id = if new_parent_rel.is_empty() {
         primary.remote_folder_id.clone()
@@ -282,10 +270,12 @@ async fn rename(
             .rename(&file_id, Some(&new_name), Some(&new_parent_id))
             .await
     })
-        .await?;
+    .await?;
 
     ctx.path_cache.remove_cascades(&from_rel).await;
-    ctx.path_cache.insert(&to_rel, &file_id, &new_parent_id).await;
+    ctx.path_cache
+        .insert(&to_rel, &file_id, &new_parent_id)
+        .await;
     ctx.db.rename(&from_rel, &to_rel)?;
 
     debug!(from = from_rel, to = to_rel, "renamed");
@@ -329,17 +319,17 @@ async fn hash_file(path: &Path) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
     use super::*;
-    use async_trait::async_trait;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use tempfile::TempDir;
-    use tokio_util::sync::CancellationToken;
     use crate::config::{AppConfig, SyncPair};
     use crate::db::Database;
     use crate::engine::bandwidth::ProgressTracker;
-    use crate::remote::{ChangesPage, HealthStatus, RemoteIndex, RemoteProvider, UploadResult};
     use crate::remote::path_cache::PathCache;
+    use crate::remote::{ChangesPage, HealthStatus, RemoteIndex, RemoteProvider, UploadResult};
+    use async_trait::async_trait;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use tempfile::TempDir;
+    use tokio_util::sync::CancellationToken;
 
     struct MockProvider {
         pub uploads: AtomicUsize,
@@ -411,6 +401,11 @@ mod tests {
         async fn check_health(&self) -> Result<HealthStatus> {
             Ok(HealthStatus::Unreachable)
         }
+
+        async fn refresh_auth(&self) -> Result<()> {
+            Ok(())
+        }
+
         async fn shutdown(&self) {}
     }
 
@@ -471,9 +466,7 @@ mod tests {
         let task = Task::SyncFile {
             path: file_path.clone(),
         };
-        handle(task, &ctx, &ignore)
-            .await
-            .unwrap();
+        handle(task, &ctx, &ignore).await.unwrap();
 
         assert_eq!(mock.uploads.load(Ordering::Relaxed), 1);
         assert!(ctx.db.get("test.txt").unwrap().is_some());
@@ -500,21 +493,13 @@ mod tests {
         let task1 = Task::SyncFile {
             path: file_path.clone(),
         };
-        handle(
-            task1,
-            &ctx,
-            &ignore,
-        )
-        .await
-        .unwrap();
+        handle(task1, &ctx, &ignore).await.unwrap();
         assert_eq!(mock.uploads.load(Ordering::Relaxed), 1);
 
         let task2 = Task::SyncFile {
             path: file_path.clone(),
         };
-        handle(task2, &ctx, &ignore)
-            .await
-            .unwrap();
+        handle(task2, &ctx, &ignore).await.unwrap();
         assert_eq!(mock.uploads.load(Ordering::Relaxed), 1);
     }
 }

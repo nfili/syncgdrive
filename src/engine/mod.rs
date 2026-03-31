@@ -10,16 +10,15 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
-use tokio::sync::{mpsc, Semaphore};
-use tokio_util::sync::CancellationToken;
-use tracing::{info, warn};
-
 use crate::config::AppConfig;
 use crate::db::Database;
 use crate::engine::bandwidth::ProgressTracker;
 use crate::ignore::IgnoreMatcher;
 use crate::remote::{path_cache::PathCache, HealthStatus, RemoteProvider};
+use anyhow::{Context, Result};
+use tokio::sync::{mpsc, Semaphore};
+use tokio_util::sync::CancellationToken;
+use tracing::{info, warn};
 
 // ── Types publics ─────────────────────────────────────────────────────────────
 
@@ -182,7 +181,11 @@ macro_rules! await_scan_interruptible {
 
 impl SyncEngine {
     pub fn new(cfg: Arc<AppConfig>, dry_run: bool, provider: Arc<dyn RemoteProvider>) -> Self {
-        Self { dry_run,cfg,provider }
+        Self {
+            dry_run,
+            cfg,
+            provider,
+        }
     }
 
     pub async fn run(
@@ -232,7 +235,7 @@ impl SyncEngine {
         let _ = status_tx.send(EngineStatus::Starting(100));
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
-        let ctx = EngineContext{
+        let ctx = EngineContext {
             cfg: self.cfg.clone(),
             db: db.clone(),
             provider: provider.clone(),
@@ -243,12 +246,7 @@ impl SyncEngine {
         };
         {
             let _ = status_tx.send(EngineStatus::Syncing { active: 0 });
-            let scan = scan::run(
-                &ctx,
-                &ignore,
-                &task_tx,
-                &status_tx,
-            );
+            let scan = scan::run(&ctx, &ignore, &task_tx, &status_tx);
             tokio::pin!(scan);
 
             loop {
@@ -498,9 +496,14 @@ impl SyncEngine {
 
                 _ = health_tick.tick() => {
                     match provider.check_health().await {
-                        Ok(HealthStatus::Ok { .. }) => {
+                        Ok(HealthStatus::Ok { .. }) | Ok(HealthStatus::AuthExpired) => {
                             if is_offline.swap(false, Ordering::Relaxed) {
+                                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
                                 info!("🌐 Connexion Internet rétablie !");
+
+                                if let Err(e) = provider.refresh_auth().await {
+                                    warn!("⚠️ Échec du rafraîchissement du token au retour en ligne : {}", e);
+                                }
                                 crate::notif::connection_restored(&self.cfg);
                                 let _ = status_tx.send(EngineStatus::Idle);
 

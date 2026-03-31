@@ -182,9 +182,15 @@ impl GDriveProvider {
             .part("file", file_part);
 
         let url = if let Some(id) = existing_id {
-            format!("{}/files/{}?uploadType=multipart&fields=id,md5Checksum,size", self.config.upload_base, id)
+            format!(
+                "{}/files/{}?uploadType=multipart&fields=id,md5Checksum,size",
+                self.config.upload_base, id
+            )
         } else {
-            format!("{}/files?uploadType=multipart&fields=id,md5Checksum,size", self.config.upload_base)
+            format!(
+                "{}/files?uploadType=multipart&fields=id,md5Checksum,size",
+                self.config.upload_base
+            )
         };
 
         let request_builder = if existing_id.is_some() {
@@ -200,7 +206,8 @@ impl GDriveProvider {
             _ = self.shutdown.cancelled() => anyhow::bail!("Upload annulé proprement."),
         };
 
-        self.check_rate_limit(res.status(), res.headers(), "upload simple").await?;
+        self.check_rate_limit(res.status(), res.headers(), "upload simple")
+            .await?;
 
         if !res.status().is_success() {
             anyhow::bail!("Erreur API (upload simple) : {}", res.status());
@@ -238,7 +245,10 @@ impl GDriveProvider {
         }
 
         let init_url = if let Some(id) = existing_id {
-            format!("{}/files/{}?uploadType=resumable", self.config.upload_base, id)
+            format!(
+                "{}/files/{}?uploadType=resumable",
+                self.config.upload_base, id
+            )
         } else {
             format!("{}/files?uploadType=resumable", self.config.upload_base)
         };
@@ -258,7 +268,8 @@ impl GDriveProvider {
             .await
             .context("Erreur réseau (init resumable)")?;
 
-        self.check_rate_limit(init_res.status(), init_res.headers(), "init resumable").await?;
+        self.check_rate_limit(init_res.status(), init_res.headers(), "init resumable")
+            .await?;
 
         if !init_res.status().is_success() {
             anyhow::bail!("Erreur API (init resumable) : {}", init_res.status());
@@ -296,14 +307,20 @@ impl GDriveProvider {
         let body = reqwest::Body::wrap_stream(stream);
         self.api_limiter.acquire().await; // Le PUT compte comme une requête
 
-        let put_future = self.client.put(&session_uri).header(header::CONTENT_LENGTH, file_size).body(body).send();
+        let put_future = self
+            .client
+            .put(&session_uri)
+            .header(header::CONTENT_LENGTH, file_size)
+            .body(body)
+            .send();
 
         let res = tokio::select! {
             result = put_future => result.context("Erreur réseau (streaming)")?,
             _ = self.shutdown.cancelled() => anyhow::bail!("Upload lourd annulé proprement."),
         };
 
-        self.check_rate_limit(res.status(), res.headers(), "streaming resumable").await?;
+        self.check_rate_limit(res.status(), res.headers(), "streaming resumable")
+            .await?;
 
         if !res.status().is_success() {
             anyhow::bail!("Erreur API (envoi du fichier) : {}", res.status());
@@ -351,7 +368,10 @@ impl RemoteProvider for GDriveProvider {
                     request = request.query(&[("pageToken", pt)]);
                 }
 
-                let res = request.send().await.context("Erreur réseau (listing BFS)")?;
+                let res = request
+                    .send()
+                    .await
+                    .context("Erreur réseau (listing BFS)")?;
 
                 // Exception ici : On ne "bail!" pas, on met la boucle en pause
                 if res.status() == 429 {
@@ -361,7 +381,11 @@ impl RemoteProvider for GDriveProvider {
                 }
 
                 if !res.status().is_success() {
-                    anyhow::bail!("Erreur API (listing dossier {}) : {}", current_path, res.status());
+                    anyhow::bail!(
+                        "Erreur API (listing dossier {}) : {}",
+                        current_path,
+                        res.status()
+                    );
                 }
 
                 let data: serde_json::Value = res.json().await?;
@@ -427,11 +451,21 @@ impl RemoteProvider for GDriveProvider {
         let safe_name = name.replace('\'', "\\'");
         let query = format!("name = '{}' and '{}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false", safe_name, parent_id);
 
-        let search_res = self.client.get(format!("{}/files", self.config.api_base)).query(&[("q", query.as_str()), ("fields", "files(id)")]).bearer_auth(&token).send().await?;
-        self.check_rate_limit(search_res.status(), search_res.headers(), "mkdir search").await?;
+        let search_res = self
+            .client
+            .get(format!("{}/files", self.config.api_base))
+            .query(&[("q", query.as_str()), ("fields", "files(id)")])
+            .bearer_auth(&token)
+            .send()
+            .await?;
+        self.check_rate_limit(search_res.status(), search_res.headers(), "mkdir search")
+            .await?;
 
         if !search_res.status().is_success() {
-            anyhow::bail!("Erreur API (vérification dossier) : {}", search_res.status());
+            anyhow::bail!(
+                "Erreur API (vérification dossier) : {}",
+                search_res.status()
+            );
         }
 
         let search_data: serde_json::Value = search_res.json().await?;
@@ -450,15 +484,24 @@ impl RemoteProvider for GDriveProvider {
         });
 
         self.api_limiter.acquire().await;
-        let create_res = self.client.post(format!("{}/files", self.config.api_base)).json(&body).bearer_auth(&token).send().await?;
-        self.check_rate_limit(create_res.status(), create_res.headers(), "mkdir create").await?;
+        let create_res = self
+            .client
+            .post(format!("{}/files", self.config.api_base))
+            .json(&body)
+            .bearer_auth(&token)
+            .send()
+            .await?;
+        self.check_rate_limit(create_res.status(), create_res.headers(), "mkdir create")
+            .await?;
 
         if !create_res.status().is_success() {
             anyhow::bail!("Erreur API (création dossier) : {}", create_res.status());
         }
 
         let create_data: serde_json::Value = create_res.json().await?;
-        let new_id = create_data["id"].as_str().context("L'API Google n'a pas retourné d'ID")?;
+        let new_id = create_data["id"]
+            .as_str()
+            .context("L'API Google n'a pas retourné d'ID")?;
 
         Ok(new_id.to_string())
     }
@@ -475,13 +518,24 @@ impl RemoteProvider for GDriveProvider {
         existing_id: Option<&str>,
         tracker: Arc<ProgressTracker>,
     ) -> Result<UploadResult> {
-        let metadata = tokio::fs::metadata(local_path).await.context("Metadata inaccessibles")?;
+        let metadata = tokio::fs::metadata(local_path)
+            .await
+            .context("Metadata inaccessibles")?;
         let file_size = metadata.len();
 
         if file_size <= self.config.chunk_threshold {
-            self.upload_simple(local_path, parent_id, file_name, existing_id, tracker).await
+            self.upload_simple(local_path, parent_id, file_name, existing_id, tracker)
+                .await
         } else {
-            self.upload_resumable(local_path, parent_id, file_name, existing_id, file_size, tracker).await
+            self.upload_resumable(
+                local_path,
+                parent_id,
+                file_name,
+                existing_id,
+                file_size,
+                tracker,
+            )
+            .await
         }
     }
 
@@ -492,13 +546,23 @@ impl RemoteProvider for GDriveProvider {
         let is_permanent = self.config.delete_mode == "permanent";
 
         let res = if is_permanent {
-            self.client.delete(format!("{}/files/{}", self.config.api_base, file_id)).bearer_auth(&token).send().await?
+            self.client
+                .delete(format!("{}/files/{}", self.config.api_base, file_id))
+                .bearer_auth(&token)
+                .send()
+                .await?
         } else {
             let body = serde_json::json!({ "trashed": true });
-            self.client.patch(format!("{}/files/{}", self.config.api_base, file_id)).bearer_auth(&token).json(&body).send().await?
+            self.client
+                .patch(format!("{}/files/{}", self.config.api_base, file_id))
+                .bearer_auth(&token)
+                .json(&body)
+                .send()
+                .await?
         };
 
-        self.check_rate_limit(res.status(), res.headers(), "delete").await?;
+        self.check_rate_limit(res.status(), res.headers(), "delete")
+            .await?;
 
         if !res.status().is_success() {
             anyhow::bail!("Erreur API (suppression) : {}", res.status());
@@ -508,9 +572,17 @@ impl RemoteProvider for GDriveProvider {
     }
 
     /// Renomme ou déplace (en changeant de dossier parent) un fichier sur le cloud.
-    async fn rename(&self, file_id: &str, new_name: Option<&str>, new_parent_id: Option<&str>) -> Result<()> {
+    async fn rename(
+        &self,
+        file_id: &str,
+        new_name: Option<&str>,
+        new_parent_id: Option<&str>,
+    ) -> Result<()> {
         let token = self.get_token().await?;
-        let mut request = self.client.patch(format!("{}/files/{}", self.config.api_base, file_id)).bearer_auth(&token);
+        let mut request = self
+            .client
+            .patch(format!("{}/files/{}", self.config.api_base, file_id))
+            .bearer_auth(&token);
 
         let mut body = serde_json::Map::new();
         if let Some(name) = new_name {
@@ -519,21 +591,35 @@ impl RemoteProvider for GDriveProvider {
 
         if let Some(new_parent) = new_parent_id {
             self.api_limiter.acquire().await;
-            let get_res = self.client.get(format!("{}/files/{}?fields=parents", self.config.api_base, file_id)).bearer_auth(&token).send().await?;
-            self.check_rate_limit(get_res.status(), get_res.headers(), "rename get_parents").await?;
+            let get_res = self
+                .client
+                .get(format!(
+                    "{}/files/{}?fields=parents",
+                    self.config.api_base, file_id
+                ))
+                .bearer_auth(&token)
+                .send()
+                .await?;
+            self.check_rate_limit(get_res.status(), get_res.headers(), "rename get_parents")
+                .await?;
 
             if get_res.status().is_success() {
                 let get_data: serde_json::Value = get_res.json().await?;
                 if let Some(parents) = get_data["parents"].as_array() {
-                    let old_parents: Vec<&str> = parents.iter().filter_map(|p| p.as_str()).collect();
-                    request = request.query(&[("addParents", new_parent), ("removeParents", &old_parents.join(","))]);
+                    let old_parents: Vec<&str> =
+                        parents.iter().filter_map(|p| p.as_str()).collect();
+                    request = request.query(&[
+                        ("addParents", new_parent),
+                        ("removeParents", &old_parents.join(",")),
+                    ]);
                 }
             }
         }
 
         self.api_limiter.acquire().await;
         let res = request.json(&body).send().await?;
-        self.check_rate_limit(res.status(), res.headers(), "rename patch").await?;
+        self.check_rate_limit(res.status(), res.headers(), "rename patch")
+            .await?;
 
         if !res.status().is_success() {
             anyhow::bail!("Erreur API (renommage) : {}", res.status());
@@ -552,11 +638,20 @@ impl RemoteProvider for GDriveProvider {
         let current_cursor = match cursor {
             Some(c) => c.to_string(),
             None => {
-                let res = self.client.get(format!("{}/changes/startPageToken", self.config.api_base)).bearer_auth(&token).send().await?;
-                self.check_rate_limit(res.status(), res.headers(), "get_changes startToken").await?;
+                let res = self
+                    .client
+                    .get(format!("{}/changes/startPageToken", self.config.api_base))
+                    .bearer_auth(&token)
+                    .send()
+                    .await?;
+                self.check_rate_limit(res.status(), res.headers(), "get_changes startToken")
+                    .await?;
 
                 let data: serde_json::Value = res.json().await?;
-                data["startPageToken"].as_str().unwrap_or_default().to_string()
+                data["startPageToken"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string()
             }
         };
 
@@ -566,7 +661,8 @@ impl RemoteProvider for GDriveProvider {
             ("fields", "nextPageToken, newStartPageToken, changes(fileId, file(name, parents), removed)")
         ]).send().await?;
 
-        self.check_rate_limit(res.status(), res.headers(), "get_changes fetch").await?;
+        self.check_rate_limit(res.status(), res.headers(), "get_changes fetch")
+            .await?;
 
         if !res.status().is_success() {
             anyhow::bail!("Erreur API (get_changes) : {}", res.status());
@@ -584,17 +680,34 @@ impl RemoteProvider for GDriveProvider {
                     changes.push(crate::remote::Change::Deleted { drive_id: file_id });
                 } else if let Some(file) = item.get("file") {
                     let name = file["name"].as_str().unwrap_or_default().to_string();
-                    let parent_id = file["parents"].as_array().and_then(|p| p.first()).and_then(|id| id.as_str()).unwrap_or_default().to_string();
+                    let parent_id = file["parents"]
+                        .as_array()
+                        .and_then(|p| p.first())
+                        .and_then(|id| id.as_str())
+                        .unwrap_or_default()
+                        .to_string();
 
-                    changes.push(crate::remote::Change::Modified { drive_id: file_id, name, parent_id });
+                    changes.push(crate::remote::Change::Modified {
+                        drive_id: file_id,
+                        name,
+                        parent_id,
+                    });
                 }
             }
         }
 
-        let new_cursor = data["nextPageToken"].as_str().or_else(|| data["newStartPageToken"].as_str()).unwrap_or(&current_cursor).to_string();
+        let new_cursor = data["nextPageToken"]
+            .as_str()
+            .or_else(|| data["newStartPageToken"].as_str())
+            .unwrap_or(&current_cursor)
+            .to_string();
         let has_more = data["nextPageToken"].as_str().is_some();
 
-        Ok(ChangesPage { changes, new_cursor, has_more })
+        Ok(ChangesPage {
+            changes,
+            new_cursor,
+            has_more,
+        })
     }
 
     /// Sonde l'API pour vérifier l'état du jeton et les quotas de stockage.
@@ -602,7 +715,13 @@ impl RemoteProvider for GDriveProvider {
         self.api_limiter.acquire().await;
         let token = self.get_token().await?;
 
-        let res = self.client.get(format!("{}/about", self.config.api_base)).query(&[("fields", "user,storageQuota")]).bearer_auth(&token).send().await?;
+        let res = self
+            .client
+            .get(format!("{}/about", self.config.api_base))
+            .query(&[("fields", "user,storageQuota")])
+            .bearer_auth(&token)
+            .send()
+            .await?;
 
         if res.status() == 429 {
             self.handle_429(res.headers()).await;
@@ -610,16 +729,37 @@ impl RemoteProvider for GDriveProvider {
         }
 
         if res.status().is_client_error() {
-            if res.status().as_u16() == 401 { return Ok(HealthStatus::AuthExpired); }
+            if res.status().as_u16() == 401 {
+                return Ok(HealthStatus::AuthExpired);
+            }
             return Ok(HealthStatus::Unreachable);
         }
 
         let data: serde_json::Value = res.json().await?;
-        let email = data["user"]["emailAddress"].as_str().unwrap_or("Inconnu").to_string();
-        let quota_used = data["storageQuota"]["usage"].as_str().unwrap_or("0").parse().unwrap_or(0);
-        let quota_total = data["storageQuota"]["limit"].as_str().unwrap_or("0").parse().unwrap_or(0);
+        let email = data["user"]["emailAddress"]
+            .as_str()
+            .unwrap_or("Inconnu")
+            .to_string();
+        let quota_used = data["storageQuota"]["usage"]
+            .as_str()
+            .unwrap_or("0")
+            .parse()
+            .unwrap_or(0);
+        let quota_total = data["storageQuota"]["limit"]
+            .as_str()
+            .unwrap_or("0")
+            .parse()
+            .unwrap_or(0);
 
-        Ok(HealthStatus::Ok { email, quota_used, quota_total })
+        Ok(HealthStatus::Ok {
+            email,
+            quota_used,
+            quota_total,
+        })
+    }
+
+    async fn refresh_auth(&self) -> Result<()> {
+        self.get_token().await.map(|_| ())
     }
 
     /// Annule globalement tous les processus asynchrones en cours.

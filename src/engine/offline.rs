@@ -14,7 +14,7 @@ use crate::engine::Task;
 
 /// Vide la file d'attente hors-ligne et réinjecte les tâches dans le circuit principal.
 ///
-/// Cette fonction est appelée automatiquement par l'orchestrateur (`SyncEngine`) 
+/// Cette fonction est appelée automatiquement par l'orchestrateur (`SyncEngine`)
 /// lorsque le `health_check` détecte le retour de la connexion Internet.
 ///
 /// # Mécanique interne
@@ -62,7 +62,7 @@ pub(crate) async fn flush_queue(
             break;
         }
 
-        // Suppression sécurisée de l'estomac SQLite (exécuté 1 par 1 pour éviter 
+        // Suppression sécurisée de l'estomac SQLite (exécuté 1 par 1 pour éviter
         // les pertes en cas de crash en plein milieu de la boucle)
         db.remove_offline_task(ot.id)?;
     }

@@ -1,7 +1,7 @@
 //! Point d'entrée de l'interface graphique GTK4 / Libadwaita.
 //!
 //! Ce module gère la boucle principale (Main Loop) de l'interface utilisateur.
-//! Il établit un pont de communication asynchrone entre le moteur de synchronisation 
+//! Il établit un pont de communication asynchrone entre le moteur de synchronisation
 //! (qui tourne sous Tokio) et l'interface graphique (qui tourne sous GLib/GTK).
 
 use gtk4::prelude::*;

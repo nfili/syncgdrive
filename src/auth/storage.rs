@@ -1,4 +1,3 @@
-
 //! Stockage chiffré des jetons d'accès.
 //!
 //! Ce module protège les jetons d'authentification (Access Token et Refresh Token)
@@ -65,7 +64,8 @@ impl EncryptedFileStorage {
 
 impl TokenStorage for EncryptedFileStorage {
     fn store(&self, tokens: &GoogleTokens) -> Result<()> {
-        let json = serde_json::to_string(tokens).context("Erreur de sérialisation des tokens vers JSON")?;
+        let json = serde_json::to_string(tokens)
+            .context("Erreur de sérialisation des tokens vers JSON")?;
 
         // Génération d'un vecteur d'initialisation (Nonce) unique et aléatoire pour chaque écriture.
         // C'est vital pour la sécurité de l'AES-GCM afin d'éviter les attaques par réutilisation de Nonce.
@@ -109,11 +109,14 @@ impl TokenStorage for EncryptedFileStorage {
             return Ok(None);
         }
 
-        let data = std::fs::read(&self.path).context("Impossible de lire le fichier chiffré depuis le disque")?;
+        let data = std::fs::read(&self.path)
+            .context("Impossible de lire le fichier chiffré depuis le disque")?;
 
         // Pré-validation : un fichier valide contient au minimum le Nonce (12 octets) + le Tag GCM (16 octets)
         if data.len() < 28 {
-            anyhow::bail!("Fichier de tokens corrompu (taille insuffisante pour contenir un Nonce et un MAC)");
+            anyhow::bail!(
+                "Fichier de tokens corrompu (taille insuffisante pour contenir un Nonce et un MAC)"
+            );
         }
 
         let nonce = Nonce::from_slice(&data[..12]);
@@ -124,17 +127,20 @@ impl TokenStorage for EncryptedFileStorage {
             anyhow::anyhow!("Échec du déchiffrement. Le CLIENT_SECRET a-t-il été modifié depuis la dernière connexion ?")
         })?;
 
-        let json = String::from_utf8(plaintext)
-            .context("Les données déchiffrées ne forment pas une chaîne de caractères UTF-8 valide")?;
+        let json = String::from_utf8(plaintext).context(
+            "Les données déchiffrées ne forment pas une chaîne de caractères UTF-8 valide",
+        )?;
 
-        let tokens = serde_json::from_str(&json).context("Structure JSON des tokens illisible ou corrompue")?;
+        let tokens = serde_json::from_str(&json)
+            .context("Structure JSON des tokens illisible ou corrompue")?;
 
         Ok(Some(tokens))
     }
 
     fn clear(&self) -> Result<()> {
         if self.path.exists() {
-            std::fs::remove_file(&self.path).context("Impossible de supprimer le fichier de tokens")?;
+            std::fs::remove_file(&self.path)
+                .context("Impossible de supprimer le fichier de tokens")?;
         }
         Ok(())
     }

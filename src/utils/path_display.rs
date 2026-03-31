@@ -99,7 +99,9 @@ pub fn open_external(target: &str) {
 
     // (Optionnel) Si jamais tu portes le projet sur d'autres OS plus tard :
     #[cfg(target_os = "windows")]
-    let _ = std::process::Command::new("cmd").args(["/C", "start", target]).spawn();
+    let _ = std::process::Command::new("cmd")
+        .args(["/C", "start", target])
+        .spawn();
     #[cfg(target_os = "macos")]
     let _ = std::process::Command::new("open").arg(target).spawn();
 }
@@ -146,9 +148,7 @@ mod tests {
     #[test]
     fn test_format_path_tooltip_long_path() {
         assert_eq!(
-            format_path_tooltip(
-                "home/user/documents/projets/syncgdrive/rapport_annuel.pdf"
-            ),
+            format_path_tooltip("home/user/documents/projets/syncgdrive/rapport_annuel.pdf"),
             "📂 home/.../projets/syncgdrive/\n📄 rapport_annuel.pdf"
         );
     }

@@ -5,18 +5,18 @@
 //! SQLite interne pour générer l'ensemble des opérations requises (le "diff").
 
 use anyhow::{Context, Result};
+use md5::{Digest, Md5};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use md5::{Digest, Md5};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 use walkdir::WalkDir;
 
 use crate::config::AppConfig;
-use crate::db::{FileEntry};
+use crate::db::FileEntry;
 use crate::engine::{EngineContext, EngineStatus, ScanPhase, Task};
 use crate::ignore::IgnoreMatcher;
 use crate::notif;
@@ -37,7 +37,7 @@ pub(crate) async fn run(
     ignore: &IgnoreMatcher,
     task_tx: &mpsc::Sender<Task>,
     status_tx: &mpsc::UnboundedSender<EngineStatus>,
-    ) -> Result<()> {
+) -> Result<()> {
     // ── Décomposition du contexte ────────────────────────────────────────────────
     let cfg = ctx.cfg.clone();
     let provider = ctx.provider.clone();
@@ -104,7 +104,7 @@ pub(crate) async fn run(
 
     for entry in WalkDir::new(&primary.local_path)
         .into_iter()
-        .filter_entry(|e| !ignore.is_ignored(e.path(),e.file_type().is_dir()))
+        .filter_entry(|e| !ignore.is_ignored(e.path(), e.file_type().is_dir()))
         .filter_map(|e| e.ok())
     {
         tokio::task::yield_now().await;
@@ -202,7 +202,7 @@ pub(crate) async fn run(
                         let pt = part_clone.clone();
                         async move { p_inner.mkdir(&parent, &pt).await }
                     })
-                        .await?
+                    .await?
                 };
 
                 path_cache
@@ -318,13 +318,12 @@ pub(crate) async fn run(
         .map(|p| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0))
         .sum();
 
-    if !dry_run{
+    if !dry_run {
         tracker.total_files.store(to_sync.len(), Ordering::Relaxed);
         tracker
             .total_bytes
             .store(total_to_sync_bytes, Ordering::Relaxed);
     }
-
 
     // ── Phase 4 : enqueue les fichiers à synchroniser ─────────────────────────
     let sync_total = to_sync.len();
@@ -381,7 +380,10 @@ pub(crate) async fn run(
                 }
                 // 🌟 SÉCURITÉ DRY-RUN : On bloque l'envoi au canal
                 if dry_run {
-                    info!("[DRY-RUN] 🗑️ À supprimer (Local DB) : {}", full_local.display());
+                    info!(
+                        "[DRY-RUN] 🗑️ À supprimer (Local DB) : {}",
+                        full_local.display()
+                    );
                 } else if task_tx.send(Task::Delete(full_local)).await.is_err() {
                     anyhow::bail!("shutdown: task queue closed");
                 }
@@ -425,7 +427,10 @@ pub(crate) async fn run(
 
             // 🌟 SÉCURITÉ DRY-RUN : On bloque l'envoi au canal
             if dry_run {
-               info!("[DRY-RUN] 🗑️ À supprimer (Remote) : {}", local_path.display());
+                info!(
+                    "[DRY-RUN] 🗑️ À supprimer (Remote) : {}",
+                    local_path.display()
+                );
             } else if task_tx.send(Task::Delete(local_path)).await.is_err() {
                 anyhow::bail!("shutdown: task queue closed");
             }
@@ -443,7 +448,11 @@ pub(crate) async fn run(
     if dry_run {
         let total_ops = sync_total + dirs_created + orphans_db + orphans_remote;
         tracing::warn!("=== DRY-RUN SUMMARY ===");
-        tracing::warn!("Files to upload:  {} ({} octets)", sync_total, total_to_sync_bytes);
+        tracing::warn!(
+            "Files to upload:  {} ({} octets)",
+            sync_total,
+            total_to_sync_bytes
+        );
         tracing::warn!("Dirs to create:   {}", dirs_created);
         tracing::warn!("Files to delete:  {}", orphans_db + orphans_remote);
         tracing::warn!("Total operations: {}", total_ops);

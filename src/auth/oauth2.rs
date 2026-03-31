@@ -76,7 +76,7 @@ impl OAuthAppCredentials {
     /// Construit une instance configurée du client OAuth2.
     ///
     /// # Paramètres
-    /// * `port` - Le port local éphémère sur lequel le serveur TCP écoute. Il est 
+    /// * `port` - Le port local éphémère sur lequel le serveur TCP écoute. Il est
     ///   injecté dynamiquement dans le `redirect_uri` pour correspondre à l'attente de Google.
     pub fn build_client(&self, port: u16) -> Result<BasicClient> {
         let client_id = ClientId::new(self.client_id.clone());
@@ -211,7 +211,7 @@ mod tests {
             AuthUrl::new("https://accounts.google.com/o/oauth2/v2/auth".into()).unwrap(),
             Some(TokenUrl::new("https://oauth2.googleapis.com/token".into()).unwrap()),
         )
-            .set_redirect_uri(RedirectUrl::new(creds.redirect_uri).unwrap());
+        .set_redirect_uri(RedirectUrl::new(creds.redirect_uri).unwrap());
 
         let (pkce_challenge, _) = PkceCodeChallenge::new_random_sha256();
         let (auth_url, _csrf_token) = client

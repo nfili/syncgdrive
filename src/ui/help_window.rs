@@ -75,7 +75,7 @@ Si votre jeton expire ou est révoqué, l'application passera en mode <i>Hors-Li
     // OPTIMISATION DRY : On utilise l'utilitaire global pour ouvrir le navigateur.
     label.connect_activate_link(|_, uri| {
         use crate::utils::path_display::open_external;
-        
+
         open_external(uri);
         gtk4::glib::Propagation::Stop
     });

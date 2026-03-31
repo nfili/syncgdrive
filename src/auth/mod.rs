@@ -11,8 +11,8 @@ pub mod oauth2;
 pub mod storage;
 
 // ── Réexportations publiques (Façade du module) ───────────────────────────────
-// Ces réexportations simplifient l'API du module. Le reste de l'application 
-// peut importer ces structures directement via `use crate::auth::GoogleAuth;` 
+// Ces réexportations simplifient l'API du module. Le reste de l'application
+// peut importer ces structures directement via `use crate::auth::GoogleAuth;`
 // sans se soucier de l'organisation interne des sous-modules.
 
 pub use self::google_auth::GoogleAuth;

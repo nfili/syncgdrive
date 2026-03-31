@@ -56,6 +56,9 @@ pub trait RemoteProvider: Send + Sync {
     /// Vérifie que les tokens sont valides et que l'API répond.
     async fn check_health(&self) -> Result<HealthStatus>;
 
+    /// Force la vérification et le rafraîchissement du jeton d'authentification.
+    async fn refresh_auth(&self) -> anyhow::Result<()>;
+
     /// Arrêt propre (annule les uploads en cours).
     async fn shutdown(&self);
 }

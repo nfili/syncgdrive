@@ -63,7 +63,10 @@ impl Database {
         // 1. S'assurer que le dossier parent existe de manière absolue
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).with_context(|| {
-                format!("Impossible de créer le dossier parent pour la base de données : {}", parent.display())
+                format!(
+                    "Impossible de créer le dossier parent pour la base de données : {}",
+                    parent.display()
+                )
             })?;
         }
 
