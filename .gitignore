@@ -21,3 +21,4 @@ Cargo.lock
 *.db
 *.sqlite
 *.sqlite3
+/Config_test/
